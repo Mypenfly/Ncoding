@@ -341,7 +341,41 @@ fn parse_kdl_document(doc: &kdl::KdlDocument) -> Result<AppConfig, anyhow::Error
     for node in doc.nodes() {
         let section = node.name().to_string();
 
-        // Handle key=value style properties (entries with names)
+        if section == "tools" {
+            if let Some(children) = node.children() {
+                for child in children.nodes() {
+                    let tool_name = child.name().to_string();
+                    let mut description = String::new();
+                    let mut exec: Vec<String> = Vec::new();
+
+                    for entry in child.entries() {
+                        let name = entry.name().map(|n| n.to_string()).unwrap_or_default();
+                        let val = if let Some(s) = entry.value().as_string() {
+                            s.to_string()
+                        } else {
+                            entry.value().to_string()
+                        };
+                        match name.as_str() {
+                            "description" => description = val,
+                            "exec" => exec.push(val),
+                            _ => exec.push(val),
+                        }
+                    }
+
+                    if !exec.is_empty() {
+                        config.tools.insert(
+                            tool_name,
+                            ToolDef {
+                                description: description.clone(),
+                                exec,
+                            },
+                        );
+                    }
+                }
+            }
+            continue;
+        }
+
         for entry in node.entries() {
             if let Some(k) = entry.name() {
                 let v = if let Some(s) = entry.value().as_string() {
@@ -353,7 +387,6 @@ fn parse_kdl_document(doc: &kdl::KdlDocument) -> Result<AppConfig, anyhow::Error
             }
         }
 
-        // Handle entries inside { } block (children document)
         if let Some(children) = node.children() {
             for child in children.nodes() {
                 let key = child.name().to_string();

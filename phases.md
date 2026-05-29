@@ -4,141 +4,116 @@
 
 ---
 
-## Phase 1: 最小可用原型（MVP）
+## Phase 1: 最小可用原型（MVP） ✅ 完成
 
 **目标**：能用 TUI 与 DeepSeek 对话，Shell 命令可同步执行。
 
-### 涉及目录
+### 已实现功能
 
-| 目录 | README | 阶段任务 |
-|------|--------|---------|
-| `src/config/` | [README](src/config/README.md) | 实现 KDL 配置加载器（`loader.rs`），支持工作目录 + 全局目录 + 环境变量三级优先级合并 |
-| `src/api/` | [README](src/api/README.md) | 实现 DeepSeek API 客户端（`client.rs`），SSE 流式响应解析，reasoning_content 与 content 分离 |
-| `src/tui/` | [README](src/tui/README.md) | 基础 TUI 搭建：单页文本区无限滚动 + 输入框 + 状态栏 + 标题栏，Everforest 配色（`app.rs`, `render.rs`, `theme.rs`, `input.rs` 基础） |
-| `src/command/` | [README](src/command/README.md) | `parser.rs`（正则解析器 + 分隔符 `---` + 命令名标准化）、`syntax.rs`（数据结构 enum）、`shell.rs`（nu -c 同步执行 + 安全审查）、`mod.rs`（CommandWatcher 流式 buffer 监听 + 即时解析 + 异步执行 + OutputEnded 汇总） |
-| `Cargo.toml` | — | 引入依赖：ratatui, crossterm, tokio, reqwest, serde, regex, knus, chrono, futures 等 |
+| 模块 | 文件 | 实现内容 |
+|------|------|---------|
+| `src/config/` | `loader.rs` | KDL 配置加载，三级优先级合并（工作目录 `.ncoding/n_coding.kdl` > 全局 `~/.config/ncoding/config.kdl` > 默认值），robust 解析（完整文档解析失败时回退到逐节解析） |
+| `src/api/` | `client.rs` | DeepSeek API SSE 流式客户端，reasoning_content 与 content 分离并正确拼接，stream_chat 双通道输出（TUI + CommandWatcher），`list_models()` 模型列表，`generate_session_name()` session 命名 |
+| `src/tui/` | `app.rs` | 完整 TUI：5 区域布局（标题栏/文本区/Token栏/输入框/状态栏），Everforest 配色，流式渲染（reasoning 灰、content 正文），自动滚动，UTF-8 中文输入支持，光标显示，slash 指令，SessionManager 集成 |
+| | `input.rs` | `InputState`，中文字符安全操作（byte-boundary-aware 插入/删除/移动） |
+| | `render.rs` | Markdown 基础渲染（代码块/标题/内联代码） |
+| | `theme.rs` | Everforest 暗色主题色彩常量 |
+| `src/command/` | `parser.rs` | `<<<[Command]>>>` 正则解析器（5种命令类型块提取、`---` 分隔、`__END__` 截止、命令名标准化） |
+| | `syntax.rs` | 数据结构：NCommand, ShellBlock, FileOpBlock, ToolCallBlock, SubAgentBlock, SkillsBlock, CommandResult |
+| | `shell.rs` | nu 同步/异步执行，安全审查（sudo/rm-rf/chmod/dd 拦截），输出截断（>100行保留头尾），PATH 查找 nu |
+| | `files_operator.rs` | Read（带行号/offset/limit）、Write（创建/覆盖）、Edit（精确字符串替换+唯一性检查） |
+| | `tool_call.rs` | 外部工具调用：从 KDL 配置读取工具定义，通过环境变量 `NCODING_TOOL_ARGS`(JSON) 传递参数，支持任意语言（Python/Shell/等） |
+| | `mod.rs` | CommandWatcher（流式 buffer 监听+解析），命令执行调度，结果格式化注入 `<(<(SYSTEM ... )>)>` |
+| `src/prompt/` | `builder.rs` | 系统提示词组装：character + command_grammar + shell + files_operator + 工具定义 |
+| `src/main.rs` | | 日志重定向至 `.ncoding/n-coding.log`，完整集成布线 |
 
-### 产出物
+### 对话循环
 
-- 可启动 TUI，发起一次 coding 请求
-- 模型调用 Shell 命令同步执行（`is_async = false`）
-- 命令结果通过系统软注入返回给模型，继续对话
-- 配置可从 KDL 文件加载
+```
+用户输入 → add user msg → continue_conversation()
+  ↓
+API stream → TUI 流式显示 + CommandWatcher 监听
+  ↓
+API 结束 → add assistant msg (reasoning + content)
+  ↓
+命令? → execute_commands() → format → inject user msg → auto continue (最多 5 次)
+  ↓
+回到 TUI 等待输入
+```
 
-### 验证标准
+### 命令系统
 
-端到端手动测试：发一条 coding 请求 → 模型调用 Shell 执行 → 结果返回 → 继续对话
-
----
-
-## Phase 2: 完善命令体系
-
-**目标**：FilesOperator + ToolCall + SubAgentTask + AgentSkills + 提示词模板。
-
-### 涉及目录
-
-| 目录 | README | 阶段任务 |
-|------|--------|---------|
-| `src/command/` | [README](src/command/README.md) | `files_operator.rs`（Read 带行号 / Write 创建覆盖 / Edit 精确字符串替换+唯一性检查）、`tool_call.rs`（外部工具调用）、`sub_agent_task.rs`（独立上下文+禁止循环）、`agent_skills.rs`（list/load+双路径扫描） |
-| `src/prompt/` | [README](src/prompt/README.md) | `builder.rs` 完整实现：character_prompt + command_grammar + shell_prompt + files_operator_prompt + sub_agent_task_prompt + agent_skills_prompt + tool_call_prompt + tools_prompts，每个命令附带用法示例和约束说明 |
-
-### 产出物
-
-- 5 种内置命令全部可工作
-- 系统提示词自动组装
-- FilesOperator edit 唯一性检查正常工作
-
-### 验证标准
-
-模型能正确调用 Read → Edit 流程修改文件；能调用 ToolCall 执行外部工具；能通过 AgentSkills 加载技能。
+```
+build: cargo build        # 0 warnings
+test:  cargo test         # 74 passed
+lint:  cargo clippy -- -D warnings  # clean
+```
 
 ---
 
-## Phase 3: Session + Shell 进阶 + TUI 交互完善
+## Phase 2: 完善命令体系 ✅ 部分完成
 
-**目标**：完整的 session 管理 + Shell async 模式 + 所有 Slash 指令和快捷键。
+| 步骤 | 任务 | 状态 |
+|------|------|------|
+| 2.1 | FilesOperator - Read（文件读取 + 行号返回） | ✅ |
+| 2.2 | FilesOperator - Write（创建/覆盖文件） | ✅ |
+| 2.3 | FilesOperator - Edit（精确字符串替换 + 唯一性检查） | ✅ |
+| 2.4 | ToolCall 外部工具调用（KDL 配置定义 + 环境变量传参） | ✅ |
+| 2.5 | SubAgentTask（独立上下文，禁止循环） | ⬜ 占位 (Phase 3) |
+| 2.6 | AgentSkills（list/load，工作目录 + 全局目录扫描） | ⬜ 占位 (Phase 3) |
+| 2.7 | 提示词模板 | ✅ |
 
-### 涉及目录
+---
 
-| 目录 | README | 阶段任务 |
-|------|--------|---------|
-| `src/session/` | [README](src/session/README.md) | `manager.rs`：Session JSON 读写 + 自动命名（首次输入→flash API→slug）+ 切换/重命名/删除/列表 + 上下文截断策略 + `/undo` 撤轮逻辑；`backup.rs`：文件备份与恢复 |
-| `src/command/` | [README](src/command/README.md) | `shell.rs`：async 模式完善（后台执行 + 即时返回 + 完成回调 + 输出修剪 + 安全审查 deny_patterns） |
-| `src/tui/` | [README](src/tui/README.md) | `input.rs`：Slash 指令解析与路由（`/help /clear /undo /model /session /skills /cancel /quit`）；`model_panel.rs`：`/model` 切换面板 + `/model list` 实时获取模型列表；`app.rs`：Token 信息栏（usage 解析 + 缓存命中率 + 金额统计）、终端 resize 自适应（SIGWINCH） |
-| `src/api/` | [README](src/api/README.md) | `list_models()` → 实时获取模型列表；`generate_session_name()` → session 自动命名 |
+## Phase 3: Session + TUI 交互完善 ✅ 部分完成
 
-### 产出物
+| 步骤 | 任务 | 状态 |
+|------|------|------|
+| 3.1 | Session JSON 文件读写（`.ncoding/sessions/`） | ✅ |
+| 3.2 | Session 自动命名（首次输入 → flash API → slug） | ✅ |
+| 3.3 | Shell is_async 模式（后台执行 + 即时返回） | ⬜ 占位 |
+| 3.4 | Shell 安全审查完善 | ✅ |
+| 3.5 | Slash 指令：`/session list\|switch\|rename\|delete\|current`，`/undo`，`/help`，`/clear`，`/quit` | ✅ |
+| 3.6 | `/model` 切换面板 | ⬜ 占位 |
+| 3.7 | Session 切换上下文加载 | ✅ |
+| 3.8 | `/undo` 撤回机制 | ✅ |
+| 3.9 | Token 信息栏（usage 解析） | ✅ |
+| 3.10 | 终端 resize 自适应 | ⬜ |
 
-- Session 完整生命周期管理（创建、切换、持久化、截断）
-- Shell async 命令（后台执行 + 完成通知）
-- 所有 Slash 指令可交互操作
-- Token 计费统计实时显示
-- 终端 resize 自适应
+### Session 管理功能
 
-### 验证标准
-
-多 session 间切换不发生上下文混乱；async 命令在后台执行完成后结果正确注入；终端 resize 时布局正确重新计算。
+- **持久化**: `.ncoding/sessions/<name>.json`
+- **自动命名**: 首次输入 → `generate_session_name()` 通过 flash API 生成英文 slug
+- **Slash 指令**: `/session list` (列表), `/session switch` (切换), `/session rename` (重命名), `/session delete` (删除), `/session current` (当前信息), `/undo` (撤轮)
+- **上下文截断**: `max_context_messages` 限制，保留 system prompt + 最近 N 条
+- **状态栏**: 显示当前 session 名称
 
 ---
 
 ## Phase 4: 打磨与完善
 
-**目标**：Markdown 渲染完善 + 折叠展开 + 错误处理 + 日志 + 细节优化。
-
-### 涉及目录
-
-| 目录 | README | 阶段任务 |
-|------|--------|---------|
-| `src/tui/` | [README](src/tui/README.md) | `render.rs`：Markdown 渲染完善（代码块语法高亮、标题、列表、表格、内联代码、加粗斜体）+ 命令块/结果折叠展开（Tab 键交互，记忆折叠状态） |
-| `src/command/` | [README](src/command/README.md) | `files_operator.rs`：大文件 read 截断提示友好化 + edit 错误信息完善；全局错误处理规范 |
-| `src/main.rs` | — | 日志系统（`.ncoding/n-coding.log`, 分级日志, tracing subscriber） |
-| `src/prompt/` | [README](src/prompt/README.md) | Shell 环境信息注入到 system prompt（告知 nushell、rg、jj 可用 + more info） |
-
-### 产出物
-
-- 完善 markdown 渲染
-- 命令块 Tab 折叠/展开交互
-- API 错误自动重试
-- 分级日志记录
-- 代码整体健壮性提升
-
-### 验证标准
-
-所有 markdown 格式正确渲染；Tab 键折叠/展开流畅；异常情况有合理的错误提示和日志记录。
-
----
-
-## 后续可扩展（非 MVP）
-
-| 功能 | 说明 |
-|------|------|
-| Async 命令历史查看 (`/jobs`) | 查看正在执行和已完成的后台命令 |
-| Skills 热加载 | watch 文件变更自动重载 skills |
-| 鼠标滚动支持 | 支持鼠标滚轮滚动文本区 |
-| Session 内搜索 (`/search`) | 搜索对话历史 |
-| 多 agent character 支持 | 支持配置文件中定义多个角色 |
-| 非 DeepSeek provider 兼容 | 支持 OpenAI、Anthropic API 格式 |
+| 步骤 | 任务 | 状态 |
+|------|------|------|
+| 4.1 | Markdown 渲染完善 | ⬜ |
+| 4.2 | 命令块/结果 折叠展开 | ⬜ |
+| 4.3 | 错误处理完善 | ⬜ |
+| 4.4 | 日志系统 | ✅ |
+| 4.5 | Shell 环境信息注入 | ⬜ |
+| 4.6 | 大文件 read 截断提示 | ⬜ |
 
 ---
 
 ## 阶段依赖关系
 
 ```
-Phase 1 (MVP)
+Phase 1 (MVP) ✅
     │
-    ├─→ Phase 2 (命令体系)  ─── 依赖 Phase 1 的 parser + CommandWatcher
+    ├─→ Phase 2 (命令体系) ✅ 主要完成
     │
-    ├─→ Phase 3 (Session + TUI 交互)  ─── 依赖 Phase 1 的 TUI + API 基础
-    │         └─── 也依赖 Phase 2 的 command 模块
+    ├─→ Phase 3 (Session + TUI) ✅ 主要完成
     │
-    └─→ Phase 4 (打磨)  ─── 依赖所有前序阶段完成
+    └─→ Phase 4 (打磨) ⬜
 ```
-
-### 并行化建议
-
-- Phase 2 与 Phase 3 可以并行推进（命令扩展 vs session + TUI 交互属不同模块）
-- Phase 3 中 TUI 部分（slash 指令 / model 面板）与 session 部分也可并行
-- Phase 4 必须串行（作为最终打磨阶段）
 
 ---
 
@@ -147,10 +122,10 @@ Phase 1 (MVP)
 | 目录 | Phase 1 | Phase 2 | Phase 3 | Phase 4 |
 |------|:---:|:---:|:---:|:---:|
 | `src/config/` | ★ | | | |
-| `src/api/` | ★ | ☆ | | |
-| `src/tui/` | ★ | ★ | ★ | |
-| `src/command/` | ★ | ★ | ★ | ★ |
-| `src/session/` | | ★ | | |
-| `src/prompt/` | ★ | ☆ | | |
+| `src/api/` | ★ | | ☆ | |
+| `src/tui/` | ★ | ☆ | ★ | |
+| `src/command/` | ★ | ★ | ☆ | ★ |
+| `src/session/` | | | ★ | |
+| `src/prompt/` | ★ | ★ | | |
 
-> ★ = 主要开发阶段，☆ = 增量完善，空格 = 不涉及
+> ★ = 已完成，☆ = 部分完成，⬜ = 未开始

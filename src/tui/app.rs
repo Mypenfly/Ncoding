@@ -21,7 +21,7 @@ use crate::{
     command::{execute_commands, format_command_results, CommandWatcher},
     config::loader::AppConfig,
     prompt::builder::PromptBuilder,
-    session::manager::{Message, Role},
+    session::manager::{Message, Role, SessionManager},
 };
 
 use super::theme::Theme;
@@ -34,7 +34,8 @@ pub struct App {
     #[allow(dead_code)]
     prompt_builder: PromptBuilder,
     cmd_watcher: CommandWatcher,
-    messages: Vec<Message>,
+    session_mgr: SessionManager,
+    max_ctx: usize,
     auto_continue_count: u32,
     input: String,
     cursor_pos: usize,
@@ -78,19 +79,34 @@ impl App {
             .map(|p| p.display().to_string())
             .unwrap_or_else(|_| "?".into());
 
-        let mut messages = Vec::new();
+        let mut session_mgr = SessionManager::new(
+            config.session.sessions_dir.clone().into(),
+            config.session.backups_dir.clone().into(),
+        );
+        let _ = session_mgr.init_dirs();
+        let session_name = format!("session-{}", chrono::Utc::now().format("%Y%m%d-%H%M%S"));
+        let _ = session_mgr.new_session(&session_name);
         let system_prompt = prompt_builder.build();
-        messages.push(Message {
+        session_mgr.add_message(Message {
             role: Role::System,
             content: Some(system_prompt),
             reasoning_content: None,
-        });
+        }).ok();
+
+        let max_ctx = config.session.max_context_messages;
+        let status_text = format!(
+            "{} · {} · {} · thinking",
+            workspace,
+            config.api.model,
+            session_mgr.current_name().unwrap_or("new"),
+        );
 
         Self {
             api_client,
             prompt_builder,
             cmd_watcher: CommandWatcher::new(),
-            messages,
+            session_mgr,
+            max_ctx,
             auto_continue_count: 0,
             input: String::new(),
             cursor_pos: 0,
@@ -100,10 +116,7 @@ impl App {
             thinking_text: String::new(),
             content_text: String::new(),
             token_info: String::new(),
-            status_text: format!(
-                "{} · {} · thinking",
-                workspace, config.api.model
-            ),
+            status_text,
             tui_tx,
             tui_rx,
             config,
@@ -185,13 +198,54 @@ impl App {
         Ok(())
     }
 
+    fn push_msg(&mut self, msg: Message) {
+        self.session_mgr.add_message(msg).ok();
+        self.session_mgr.truncate_context(self.max_ctx);
+    }
+
+    fn msgs(&self) -> Vec<Message> {
+        self.session_mgr.messages()
+    }
+
+    fn clear_non_system(&mut self) {
+        self.session_mgr.truncate_context(1);
+    }
+
+    fn update_status(&mut self) {
+        let workspace = std::env::current_dir()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|_| "?".into());
+        self.status_text = format!(
+            "{} · {} · {} · thinking",
+            workspace,
+            self.config.api.model,
+            self.session_mgr.current_name().unwrap_or("new"),
+        );
+    }
+
     async fn handle_user_input(&mut self, input_text: String) {
-        let user_msg = Message {
+        self.push_msg(Message {
             role: Role::User,
             content: Some(input_text.clone()),
             reasoning_content: None,
-        };
-        self.messages.push(user_msg);
+        });
+
+        if self.auto_continue_count == 0 {
+            let current = self.session_mgr.current_name().unwrap_or("");
+            if current.starts_with("session-") && current.len() > 20 {
+                if let Ok(name) = self
+                    .api_client
+                    .generate_session_name(&input_text, &self.config.api.sub_model)
+                    .await
+                {
+                    if let Ok(()) = self.session_mgr.rename_session(&name) {
+                        self.update_status();
+                    }
+                }
+            }
+            self.auto_continue_count = 0;
+        }
+
         self.auto_continue_count = 0;
         self.auto_scroll = true;
         self.continue_conversation().await;
@@ -223,7 +277,7 @@ impl App {
             }
             TuiEvent::Error(err) => {
                 self.is_streaming = false;
-                self.messages.push(Message {
+                self.push_msg(Message {
                     role: Role::Assistant,
                     content: Some(format!("[Error] {}", err)),
                     reasoning_content: None,
@@ -244,7 +298,7 @@ impl App {
         };
 
         if !assistant_content.is_empty() {
-            self.messages.push(Message {
+            self.push_msg(Message {
                 role: Role::Assistant,
                 content: Some(assistant_content),
                 reasoning_content: reasoning_opt,
@@ -257,7 +311,7 @@ impl App {
             let injection = format_command_results(&results);
 
             if !injection.is_empty() {
-                self.messages.push(Message {
+                self.push_msg(Message {
                     role: Role::User,
                     content: Some(injection),
                     reasoning_content: None,
@@ -279,7 +333,7 @@ impl App {
 
         let client = self.api_client.clone();
         let tx = self.tui_tx.clone();
-        let messages = self.messages.clone();
+        let messages = self.msgs();
         let thinking_type = if self.config.thinking.enabled {
             "enabled"
         } else {
@@ -316,34 +370,209 @@ impl App {
                 std::process::exit(0);
             }
             "/help" => {
-                let help = "/help - show this help\n/quit, /exit, /q - exit\n/model - model panel (Phase 3)\n/session - session management (Phase 3)\n/cancel - cancel current stream (Esc)\n/clear - clear display\n";
-                self.messages.push(Message {
+                let help = "/help - show this help\n\
+                /quit, /exit, /q - exit\n\
+                /model - model panel (Phase 3)\n\
+                /cancel - cancel current stream (Esc)\n\
+                /clear - clear display\n\
+                /session list - list all sessions\n\
+                /session switch <name> - switch session\n\
+                /session rename <name> - rename current\n\
+                /session delete <name> - delete session\n\
+                /session current - show current\n\
+                /undo - undo last turn";
+                self.push_msg(Message {
                     role: Role::Assistant,
                     content: Some(help.into()),
                     reasoning_content: None,
                 });
             }
             "/clear" => {
-                self.messages.clear();
-                let system_prompt = self.prompt_builder.build();
-                self.messages.push(Message {
-                    role: Role::System,
-                    content: Some(system_prompt),
-                    reasoning_content: None,
-                });
+                self.clear_non_system();
             }
-            "/model" | "/session" | "/skills" | "/undo" => {
-                self.messages.push(Message {
+            "/session" => {
+                let sub = parts.get(1).copied().unwrap_or("help");
+                self.handle_session_cmd(sub, &parts).await;
+            }
+            "/undo" => {
+                let removed = self.session_mgr.remove_last_turn();
+                match removed {
+                    Some((_u, _a)) => {
+                        self.push_msg(Message {
+                            role: Role::Assistant,
+                            content: Some("[undo] removed last turn".into()),
+                            reasoning_content: None,
+                        });
+                    }
+                    None => {
+                        self.push_msg(Message {
+                            role: Role::Assistant,
+                            content: Some("[undo] nothing to undo".into()),
+                            reasoning_content: None,
+                        });
+                    }
+                }
+            }
+            "/model" | "/skills" => {
+                self.push_msg(Message {
                     role: Role::Assistant,
                     content: Some(format!("{}: coming in Phase 3", cmd)),
                     reasoning_content: None,
                 });
             }
             _ => {
-                self.messages.push(Message {
+                self.push_msg(Message {
                     role: Role::Assistant,
                     content: Some(format!("unknown command: {}. Type /help for available commands.",
                         cmd)),
+                    reasoning_content: None,
+                });
+            }
+        }
+    }
+
+    async fn handle_session_cmd(&mut self, sub: &str, parts: &[&str]) {
+        match sub {
+            "list" => {
+                match self.session_mgr.list_sessions() {
+                    Ok(sessions) => {
+                        if sessions.is_empty() {
+                            self.push_msg(Message {
+                                role: Role::Assistant,
+                                content: Some("No sessions found.".into()),
+                                reasoning_content: None,
+                            });
+                        } else {
+                            let mut out = String::from("Sessions:\n");
+                            for (name, updated) in &sessions {
+                                let current_mark = if Some(name.as_str()) == self.session_mgr.current_name() {
+                                    " *"
+                                } else {
+                                    ""
+                                };
+                                out.push_str(&format!("  {} ({}){}\n", name, updated.format("%Y-%m-%d %H:%M"), current_mark));
+                            }
+                            self.push_msg(Message {
+                                role: Role::Assistant,
+                                content: Some(out),
+                                reasoning_content: None,
+                            });
+                        }
+                    }
+                    Err(e) => {
+                        self.push_msg(Message {
+                            role: Role::Assistant,
+                            content: Some(format!("Error listing sessions: {}", e)),
+                            reasoning_content: None,
+                        });
+                    }
+                }
+            }
+            "switch" => {
+                let name = parts.get(2).copied().unwrap_or("");
+                if name.is_empty() {
+                    self.push_msg(Message {
+                        role: Role::Assistant,
+                        content: Some("Usage: /session switch <name>".into()),
+                        reasoning_content: None,
+                    });
+                    return;
+                }
+                match self.session_mgr.load_session(name) {
+                    Ok(()) => {
+                        self.update_status();
+                        let msgs = self.msgs();
+                        self.push_msg(Message {
+                            role: Role::Assistant,
+                            content: Some(format!("Switched to session '{}' ({} messages)", name, msgs.len())),
+                            reasoning_content: None,
+                        });
+                    }
+                    Err(e) => {
+                        self.push_msg(Message {
+                            role: Role::Assistant,
+                            content: Some(format!("Failed to switch: {}", e)),
+                            reasoning_content: None,
+                        });
+                    }
+                }
+            }
+            "rename" => {
+                let new_name = parts.get(2).copied().unwrap_or("");
+                if new_name.is_empty() {
+                    self.push_msg(Message {
+                        role: Role::Assistant,
+                        content: Some("Usage: /session rename <new_name>".into()),
+                        reasoning_content: None,
+                    });
+                    return;
+                }
+                match self.session_mgr.rename_session(new_name) {
+                    Ok(()) => {
+                        self.update_status();
+                        self.push_msg(Message {
+                            role: Role::Assistant,
+                            content: Some(format!("Renamed to '{}'", new_name)),
+                            reasoning_content: None,
+                        });
+                    }
+                    Err(e) => {
+                        self.push_msg(Message {
+                            role: Role::Assistant,
+                            content: Some(format!("Rename failed: {}", e)),
+                            reasoning_content: None,
+                        });
+                    }
+                }
+            }
+            "delete" => {
+                let name = parts.get(2).copied().unwrap_or("");
+                if name.is_empty() {
+                    self.push_msg(Message {
+                        role: Role::Assistant,
+                        content: Some("Usage: /session delete <name>".into()),
+                        reasoning_content: None,
+                    });
+                    return;
+                }
+                if Some(name) == self.session_mgr.current_name() {
+                    self.push_msg(Message {
+                        role: Role::Assistant,
+                        content: Some("Cannot delete current session. Switch first.".into()),
+                        reasoning_content: None,
+                    });
+                    return;
+                }
+                match self.session_mgr.delete_session(name) {
+                    Ok(()) => {
+                        self.push_msg(Message {
+                            role: Role::Assistant,
+                            content: Some(format!("Deleted session '{}'", name)),
+                            reasoning_content: None,
+                        });
+                    }
+                    Err(e) => {
+                        self.push_msg(Message {
+                            role: Role::Assistant,
+                            content: Some(format!("Delete failed: {}", e)),
+                            reasoning_content: None,
+                        });
+                    }
+                }
+            }
+            "current" => {
+                let name = self.session_mgr.current_name().unwrap_or("none");
+                let msgs = self.msgs();
+                self.push_msg(Message {
+                    role: Role::Assistant,
+                    content: Some(format!("Current session: '{}' ({} messages)", name, msgs.len())),
+                    reasoning_content: None,
+                });
+            }
+            _ => {
+                self.push_msg(Message {
+                    role: Role::Assistant,
+                    content: Some("Usage: /session [list|switch|rename|delete|current]".into()),
                     reasoning_content: None,
                 });
             }
@@ -382,7 +611,7 @@ impl App {
         let title = format!(
             " N-coding · {} · {} ",
             self.config.api.model,
-            if self.messages.len() > 1 {
+            if self.msgs().len() > 1 {
                 "session"
             } else {
                 "new"
@@ -397,7 +626,8 @@ impl App {
         let text_area = chunks[1];
         let mut lines: Vec<Line> = Vec::new();
 
-        for msg in &self.messages {
+        let display_msgs = self.msgs();
+        for msg in &display_msgs {
             match msg.role {
                 Role::System => {
                     lines.push(Line::from(Span::styled(

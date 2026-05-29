@@ -182,4 +182,192 @@ impl SessionManager {
             None
         }
     }
+
+    pub fn truncate_context(&mut self, max_messages: usize) {
+        if let Some(ref mut session) = self.current_session {
+            let total = session.messages.len();
+            if total <= max_messages {
+                return;
+            }
+            let system_count = session
+                .messages
+                .iter()
+                .take_while(|m| m.role == Role::System)
+                .count();
+            let keep = max_messages.max(system_count);
+            let remove = total.saturating_sub(keep);
+            let drain_start = system_count;
+            session.messages.drain(drain_start..drain_start + remove);
+        }
+    }
+
+    pub fn set_messages(&mut self, messages: Vec<Message>) {
+        if let Some(ref mut session) = self.current_session {
+            session.messages = messages;
+            session.updated_at = Utc::now();
+        }
+    }
+
+    pub fn messages(&self) -> Vec<Message> {
+        self.current_session
+            .as_ref()
+            .map(|s| s.messages.clone())
+            .unwrap_or_default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_test_manager() -> SessionManager {
+        let dir = tempfile::tempdir().unwrap();
+        let sessions = dir.path().join("sessions");
+        let backups = dir.path().join("backups");
+        SessionManager::new(sessions, backups)
+    }
+
+    fn make_msg(role: Role, content: &str) -> Message {
+        Message {
+            role,
+            content: Some(content.to_string()),
+            reasoning_content: None,
+        }
+    }
+
+    #[test]
+    fn test_new_session_creates_file() {
+        let mut mgr = make_test_manager();
+        mgr.init_dirs().unwrap();
+        mgr.new_session("test-session").unwrap();
+        assert_eq!(mgr.current_name(), Some("test-session"));
+
+        let path = mgr.sessions_dir.join("test-session.json");
+        assert!(path.exists());
+        let json = std::fs::read_to_string(&path).unwrap();
+        let session: Session = serde_json::from_str(&json).unwrap();
+        assert_eq!(session.name, "test-session");
+        assert!(session.messages.is_empty());
+    }
+
+    #[test]
+    fn test_add_and_get_messages() {
+        let mut mgr = make_test_manager();
+        mgr.init_dirs().unwrap();
+        mgr.new_session("test").unwrap();
+        mgr.add_message(make_msg(Role::System, "system")).unwrap();
+        mgr.add_message(make_msg(Role::User, "hello")).unwrap();
+        mgr.add_message(make_msg(Role::Assistant, "hi")).unwrap();
+
+        let msgs = mgr.messages();
+        assert_eq!(msgs.len(), 3);
+        assert_eq!(msgs[1].role, Role::User);
+        assert_eq!(msgs[1].content.as_deref(), Some("hello"));
+    }
+
+    #[test]
+    fn test_remove_last_turn() {
+        let mut mgr = make_test_manager();
+        mgr.init_dirs().unwrap();
+        mgr.new_session("test").unwrap();
+        mgr.add_message(make_msg(Role::System, "system")).unwrap();
+        mgr.add_message(make_msg(Role::User, "q1")).unwrap();
+        mgr.add_message(make_msg(Role::Assistant, "a1")).unwrap();
+        mgr.add_message(make_msg(Role::User, "q2")).unwrap();
+        mgr.add_message(make_msg(Role::Assistant, "a2")).unwrap();
+
+        let removed = mgr.remove_last_turn();
+        assert!(removed.is_some());
+        let (u, a) = removed.unwrap();
+        assert_eq!(u.content.as_deref(), Some("q2"));
+        assert_eq!(a.content.as_deref(), Some("a2"));
+
+        let msgs = mgr.messages();
+        assert_eq!(msgs.len(), 3);
+        assert_eq!(msgs[2].content.as_deref(), Some("a1"));
+    }
+
+    #[test]
+    fn test_truncate_context_keeps_system() {
+        let mut mgr = make_test_manager();
+        mgr.init_dirs().unwrap();
+        mgr.new_session("test").unwrap();
+        mgr.add_message(make_msg(Role::System, "system")).unwrap();
+        for i in 0..10 {
+            mgr.add_message(make_msg(Role::User, &format!("u{}", i))).unwrap();
+            mgr.add_message(make_msg(Role::Assistant, &format!("a{}", i))).unwrap();
+        }
+        assert_eq!(mgr.messages().len(), 21);
+
+        mgr.truncate_context(5);
+        let msgs = mgr.messages();
+        assert_eq!(msgs.len(), 5);
+        assert_eq!(msgs[0].role, Role::System);
+        assert_eq!(msgs[0].content.as_deref(), Some("system"));
+    }
+
+    #[test]
+    fn test_list_sessions() {
+        let mut mgr = make_test_manager();
+        mgr.init_dirs().unwrap();
+        mgr.new_session("alpha").unwrap();
+        mgr.add_message(make_msg(Role::User, "hi")).unwrap();
+        mgr.new_session("beta").unwrap();
+        mgr.add_message(make_msg(Role::User, "hello")).unwrap();
+
+        let list = mgr.list_sessions().unwrap();
+        assert_eq!(list.len(), 2);
+        let names: Vec<&str> = list.iter().map(|(n, _)| n.as_str()).collect();
+        assert!(names.contains(&"alpha"));
+        assert!(names.contains(&"beta"));
+    }
+
+    #[test]
+    fn test_rename_session() {
+        let mut mgr = make_test_manager();
+        mgr.init_dirs().unwrap();
+        mgr.new_session("old-name").unwrap();
+        mgr.rename_session("new-name").unwrap();
+        assert_eq!(mgr.current_name(), Some("new-name"));
+        assert!(!mgr.sessions_dir.join("old-name.json").exists());
+        assert!(mgr.sessions_dir.join("new-name.json").exists());
+    }
+
+    #[test]
+    fn test_delete_session() {
+        let mut mgr = make_test_manager();
+        mgr.init_dirs().unwrap();
+        mgr.new_session("to-delete").unwrap();
+        let path = mgr.sessions_dir.join("to-delete.json");
+        assert!(path.exists());
+        mgr.delete_session("to-delete").unwrap();
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn test_load_session() {
+        let mut mgr = make_test_manager();
+        mgr.init_dirs().unwrap();
+        mgr.new_session("load-test").unwrap();
+        mgr.add_message(make_msg(Role::User, "persisted")).unwrap();
+
+        let mut mgr2 = make_test_manager();
+        mgr2.sessions_dir = mgr.sessions_dir.clone();
+        mgr2.load_session("load-test").unwrap();
+        let msgs = mgr2.messages();
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].content.as_deref(), Some("persisted"));
+    }
+
+    #[test]
+    fn test_set_messages() {
+        let mut mgr = make_test_manager();
+        mgr.init_dirs().unwrap();
+        mgr.new_session("test").unwrap();
+        mgr.set_messages(vec![
+            make_msg(Role::System, "s"),
+            make_msg(Role::User, "u"),
+        ]);
+        assert_eq!(mgr.messages().len(), 2);
+    }
 }
