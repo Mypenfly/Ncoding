@@ -1,11 +1,11 @@
-#![allow(dead_code, unused_imports)]
+#![allow(dead_code)]
 
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Session {
@@ -30,6 +30,8 @@ pub enum Role {
     System,
     User,
     Assistant,
+    #[serde(other)]
+    Info,
 }
 
 pub struct SessionManager {
@@ -67,7 +69,9 @@ impl SessionManager {
     pub fn save_current(&self) -> std::io::Result<()> {
         if let Some(session) = &self.current_session {
             let path = self.sessions_dir.join(format!("{}.json", session.name));
-            let json = serde_json::to_string_pretty(session)?;
+            let mut save_session = session.clone();
+            save_session.messages.retain(|m| m.role != Role::Info);
+            let json = serde_json::to_string_pretty(&save_session)?;
             fs::write(&path, json)?;
             debug!("Session saved: {}", path.display());
         }

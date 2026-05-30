@@ -1,7 +1,7 @@
 use std::fs;
 use std::io::BufRead;
 use std::path::{Path, PathBuf};
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
 use super::syntax::{CommandOutcome, CommandResult, CommandType, FileMode, FileOpBlock};
 
@@ -10,6 +10,20 @@ pub async fn execute(blocks: Vec<FileOpBlock>) -> Result<Vec<CommandResult>, any
 
     for (i, block) in blocks.into_iter().enumerate() {
         let base_path = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+
+        let resolved = match resolve_path(&block.path, &base_path) {
+            Ok(p) => p,
+            Err(e) => {
+                results.push(CommandResult {
+                    command_type: CommandType::FilesOperator,
+                    block_index: i,
+                    outcome: CommandOutcome::Failure {
+                        error: format!("path resolution error: {}", e),
+                    },
+                });
+                continue;
+            }
+        };
 
         if is_path_escape(&block.path) {
             results.push(CommandResult {
@@ -23,12 +37,11 @@ pub async fn execute(blocks: Vec<FileOpBlock>) -> Result<Vec<CommandResult>, any
             continue;
         }
 
-        let full_path = base_path.join(&block.path);
         let result = match block.mode {
-            FileMode::Read => read_file(&full_path, block.offset, block.limit),
-            FileMode::Write => write_file(&full_path, block.content.as_deref()),
+            FileMode::Read => read_file(&resolved, block.offset, block.limit),
+            FileMode::Write => write_file(&resolved, block.content.as_deref()),
             FileMode::Edit => edit_file(
-                &full_path,
+                &resolved,
                 block.old_str.as_deref(),
                 block.new_str.as_deref(),
             ),
@@ -46,6 +59,27 @@ pub async fn execute(blocks: Vec<FileOpBlock>) -> Result<Vec<CommandResult>, any
 
 fn is_path_escape(path: &Path) -> bool {
     path.to_string_lossy().contains("..")
+}
+
+fn resolve_path(path: &Path, base: &Path) -> Result<PathBuf, String> {
+    let path_str = path.to_string_lossy();
+
+    let expanded = if path_str.starts_with("~/") {
+        let home = dirs::home_dir().ok_or_else(|| "cannot determine home directory".to_string())?;
+        home.join(path_str.strip_prefix("~/").unwrap())
+    } else if path_str.as_ref() == "~" {
+        dirs::home_dir().ok_or_else(|| "cannot determine home directory".to_string())?
+    } else {
+        PathBuf::from(path_str.as_ref())
+    };
+
+    let joined = if expanded.is_absolute() {
+        expanded
+    } else {
+        base.join(&expanded)
+    };
+
+    Ok(joined)
 }
 
 fn read_file(

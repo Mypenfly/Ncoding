@@ -10,7 +10,11 @@ use tracing::info;
 
 fn init_logging() -> anyhow::Result<()> {
     let _ = fs::create_dir_all(".ncoding");
-    let file = fs::File::create(".ncoding/n-coding.log")?;
+    let file = fs::OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .create(true)
+        .open(".ncoding/n-coding.log")?;
     tracing_subscriber::fmt()
         .with_writer(std::sync::Mutex::new(file))
         .with_env_filter(

@@ -1,5 +1,3 @@
-#![allow(dead_code, unused_imports)]
-
 use ratatui::style::Color;
 
 pub struct Theme {
@@ -9,9 +7,11 @@ pub struct Theme {
     pub grey2: Color,
     pub purple: Color,
     pub aqua: Color,
+    pub green: Color,
     pub yellow: Color,
     pub red: Color,
     pub orange: Color,
+    #[allow(dead_code)]
     pub grey0: Color,
 }
 
@@ -24,6 +24,7 @@ impl Theme {
             grey2: Color::from_u32(0x00939f91),
             purple: Color::from_u32(0x00d699b6),
             aqua: Color::from_u32(0x0083c092),
+            green: Color::from_u32(0x00a7c080),
             yellow: Color::from_u32(0x00dbbc7f),
             red: Color::from_u32(0x00e67e80),
             orange: Color::from_u32(0x00e69875),

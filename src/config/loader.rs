@@ -245,35 +245,48 @@ impl Default for SafetyConfig {
 pub fn load() -> Result<AppConfig, anyhow::Error> {
     let mut config = AppConfig::default();
 
-    if let Some(global_path) = dirs::config_dir().map(|d| d.join("ncoding/config.kdl")) {
-        if global_path.exists() {
-            debug!("Loading global config: {}", global_path.display());
-            match fs::read_to_string(&global_path) {
-                Ok(content) => {
-                    let c = parse_kdl_config_robust(&content);
-                    merge_config(&mut config, c);
-                }
-                Err(e) => tracing::warn!("Failed to read global config {}: {}", global_path.display(), e),
+    let global_path = dirs::config_dir()
+        .map(|d| d.join("ncoding/config.kdl"))
+        .unwrap_or_else(|| PathBuf::from("~/.config/ncoding/config.kdl"));
+
+    let mut global_config = AppConfig::default();
+    if global_path.exists() {
+        debug!("Loading global config: {}", global_path.display());
+        match fs::read_to_string(&global_path) {
+            Ok(content) => {
+                global_config = parse_kdl_config_robust(&content);
+                tracing::info!("Global config loaded from {}", global_path.display());
             }
-        } else {
-            tracing::info!("No global config at {}", global_path.display());
+            Err(e) => tracing::warn!("Failed to read global config {}: {}", global_path.display(), e),
         }
+    } else {
+        tracing::info!("No global config at {}", global_path.display());
     }
 
-    let local_paths = [PathBuf::from(".ncoding/n_coding.kdl")];
-    for path in &local_paths {
-        if path.exists() {
-            debug!("Loading local config: {}", path.display());
-            match fs::read_to_string(path) {
-                Ok(content) => {
-                    let c = parse_kdl_config_robust(&content);
-                    merge_config(&mut config, c);
-                }
-                Err(e) => tracing::warn!("Failed to read local config {}: {}", path.display(), e),
+    config.api = global_config.api.clone();
+
+    let local_path = PathBuf::from(".ncoding/n_coding.kdl");
+    let local_config = if local_path.exists() {
+        debug!("Loading local config: {}", local_path.display());
+        match fs::read_to_string(&local_path) {
+            Ok(content) => {
+                let c = parse_kdl_config_robust(&content);
+                tracing::info!("Local config loaded from {}", local_path.display());
+                Some(c)
             }
-        } else {
-            tracing::info!("No local config at {}", path.display());
+            Err(e) => {
+                tracing::warn!("Failed to read local config {}: {}", local_path.display(), e);
+                None
+            }
         }
+    } else {
+        tracing::info!("No local config at {}", local_path.display());
+        None
+    };
+
+    merge_non_api_config(&mut config, &global_config);
+    if let Some(ref local) = local_config {
+        merge_non_api_config(&mut config, local);
     }
 
     tracing::info!(
@@ -284,6 +297,19 @@ pub fn load() -> Result<AppConfig, anyhow::Error> {
     );
 
     Ok(config)
+}
+
+fn merge_non_api_config(base: &mut AppConfig, overlay: &AppConfig) {
+    base.thinking = overlay.thinking.clone();
+    base.session = overlay.session.clone();
+    base.skills = overlay.skills.clone();
+    base.safety = overlay.safety.clone();
+    if !overlay.tools.is_empty() {
+        base.tools = overlay.tools.clone();
+    }
+    if let Some(ref ch) = overlay.character {
+        base.character = Some(ch.clone());
+    }
 }
 
 fn parse_kdl_config(content: &str) -> Result<AppConfig, anyhow::Error> {

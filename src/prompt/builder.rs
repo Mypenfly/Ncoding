@@ -1,7 +1,6 @@
-#![allow(dead_code, unused_imports)]
-
 //! System prompt builder — assembles the full system prompt from
 //! character config, command grammars, shell info, and tool definitions.
+#![allow(dead_code)]
 
 use crate::config::loader::AppConfig;
 
@@ -38,11 +37,14 @@ impl PromptBuilder {
     pub fn build(&self) -> String {
         let parts = vec![
             self.character_prompt(),
+            self.build_time_injection(),
             self.command_grammar_prompt(),
             self.shell_prompt(),
             self.files_operator_prompt(),
             self.sub_agent_task_prompt(),
             self.agent_skills_prompt(),
+            self.checklist_prompt(),
+            self.agent_logs_prompt(),
             self.tool_call_prompt(),
             self.tools_prompts(),
         ];
@@ -58,6 +60,13 @@ impl PromptBuilder {
             self.shell_env.workspace,
             self.shell_env.installed_tools.join(", "),
             self.shell_env.available_skills.join(", ")
+        )
+    }
+
+    fn build_time_injection(&self) -> String {
+        format!(
+            "当前时间: {} (UTC). 距离你的训练数据截止日期已过了一段时间，如有不确定的信息请使用工具查询。",
+            chrono::Utc::now().format("%Y-%m-%d %H:%M UTC")
         )
     }
 
@@ -86,12 +95,7 @@ impl PromptBuilder {
 - 命令名使用驼峰命名（如 ToolCall, Shell, FilesOperator），内部会自动忽略大小写和下划线
 - 多个同类型命令用 --- 分隔
 - value 中的内容可以包含换行和特殊字符，使用「「 」」包裹
-- 命令块不是必须使用 <<<[__END__]>>> 结束，下一个命令开始或输出结束也会自动结束
-
-## 系统软注入
-
-你可能会在 user 消息中看到 <(<(SYSTEM ... )>)> 格式的内容，这是系统自动注入的信息，
-用于告知当前时间、命令执行结果等。这是系统信息，不是你与用户对话的内容。请根据其中的信息来辅助决策。"#
+- 命令块建议使用截止符 <<<[__END__]>>> 结束，如果不使用下一个命令开始或输出结束也会自动结束，但这时可能出现解析问题"#
             .into()
     }
 
@@ -102,6 +106,13 @@ impl PromptBuilder {
 你的 shell 环境是 nushell (nu)，不是 bash。请使用 nushell 语法编写命令。
 系统已安装以下额外工具：rg (ripgrep), jj (jujutsu)。
 
+重要提示：
+- 使用 help commands 查看所有可用命令
+- 使用 help <command> 查看具体命令的用法
+- 文件搜索请使用 rg (ripgrep) 而非 find，get 命令
+- 目录搜索请使用 ls **/* | where ...
+- 长运行时间的命令（如 cargo build）建议使用 is_async=true
+
 语法：
 <<<[Shell]>>>
 「command」:「「你的命令」」
@@ -111,7 +122,7 @@ impl PromptBuilder {
 参数说明：
 - command: 要执行的 nushell 命令（必填）
 - is_async: 是否异步执行（选填，默认 false）
-  - false: 同步执行，等待结果返回
+  - false: 同步执行，等待结果返回（默认超时120秒）
   - true: 异步执行，适用于 cargo build 等长命令
 
 安全限制：
@@ -190,6 +201,70 @@ subagent 不能使用 SubAgentTask 命令。执行完毕后返回最后一条输
 - 遇到 bug → systematic-debugging
 - 任务完成需要审查 → code-review
 使用「mode」:「「list」」查看当前可用的所有 skills。"#
+            .into()
+    }
+
+    fn checklist_prompt(&self) -> String {
+        r#"## CheckList Command
+
+规划和管理任务列表。当进行复杂的多步骤工作时，优先使用此命令创建和跟踪任务。
+
+### Create — 创建新任务
+<<<[CheckList]>>>
+「mode」:「「create」」
+「title」:「「修复登录超时问题」」
+「content」:「「调查 auth_service.rs 中 30 秒超时的原因，检查数据库连接池配置」」
+<<<[__END__]>>>
+
+### Update — 更新任务状态
+<<<[CheckList]>>>
+「mode」:「「update」」
+「id」:「「任务的ID」」
+「status」:「「in_progress」」
+<<<[__END__]>>>
+
+支持的状态: waiting, in_progress, done, failed, cancelled
+
+### List — 列出所有任务
+<<<[CheckList]>>>
+「mode」:「「list」」
+<<<[__END__]>>>
+
+重要规则：
+- 启动复杂任务时先创建 CheckList 规划步骤
+- 开始执行时更新为 in_progress，完成时更新为 done
+- 系统会根据未完成任务自动提醒你继续工作
+- 使用 list 模式查看当前进度"#
+            .into()
+    }
+
+    fn agent_logs_prompt(&self) -> String {
+        r#"## AgentLogs Command
+
+读写开发日志，用于记录关键决策、踩坑经验、架构变更等。日志保存在 .ncoding/agent_logs/ 中。
+
+### Write — 写入日志
+<<<[AgentLogs]>>>
+「mode」:「「write」」
+「filename」:「「fix_auth_timeout.md」」
+「content」:「「根因：数据库连接池 max_connections=5 不够导致排队超时。解决方法：增大到 20，并添加连接健康检查。」」
+<<<[__END__]>>>
+
+### Read — 读取日志
+<<<[AgentLogs]>>>
+「mode」:「「read」」
+「filename」:「「fix_auth_timeout.md」」
+<<<[__END__]>>>
+
+### List — 列出所有日志
+<<<[AgentLogs]>>>
+「mode」:「「list」」
+<<<[__END__]>>>
+
+推荐用法：
+- 解决完重要 bug 后写日志记录原因和方法
+- 做架构决策时写日志记录 trade-off 分析
+- 文件名建议用描述性的 slug（如 fix_auth_timeout.md），不写则自动生成时间戳文件名"#
             .into()
     }
 

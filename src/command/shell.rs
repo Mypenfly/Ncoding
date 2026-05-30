@@ -1,6 +1,3 @@
-#![allow(dead_code, unused_imports)]
-
-use std::process::Command;
 use std::time::Duration;
 use tracing::info;
 
@@ -31,9 +28,13 @@ pub async fn execute(blocks: Vec<ShellBlock>) -> Result<Vec<CommandResult>, anyh
                 },
             });
         } else {
-            let handle = tokio::spawn(async move {
-                run_shell_sync(&block.command, i, Duration::from_secs(120)).await
-            });
+            let timeout = if command_uses_find(&block.command) {
+                Duration::from_secs(10)
+            } else {
+                Duration::from_secs(120)
+            };
+            let handle =
+                tokio::spawn(async move { run_shell_sync(&block.command, i, timeout).await });
             handles.push(handle);
         }
     }
@@ -147,57 +148,61 @@ mod tests {
 async fn run_shell_sync(
     command: &str,
     block_index: usize,
-    timeout: Duration,
+    timeout_dur: Duration,
 ) -> Option<CommandResult> {
     info!("Executing sync shell: {}", command);
 
-    let child = tokio::task::spawn_blocking({
-        let cmd = command.to_string();
-        move || Command::new("nu").arg("-c").arg(&cmd).output()
-    });
+    let result = tokio::time::timeout(timeout_dur, async {
+        let output = tokio::process::Command::new("nu")
+            .arg("-c")
+            .arg(command)
+            .output()
+            .await;
 
-    let result = match tokio::time::timeout(timeout, child).await {
-        Ok(Ok(Ok(output))) => {
-            let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-            let (stdout, stderr) = truncate_output(stdout, stderr);
-            CommandResult {
+        match output {
+            Ok(out) => {
+                let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+                let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+                let (stdout, stderr) = truncate_output(stdout, stderr);
+                CommandResult {
+                    command_type: CommandType::Shell,
+                    block_index,
+                    outcome: CommandOutcome::Success {
+                        summary: format!(
+                            "exit_code: {}\nstdout: {}\nstderr: {}",
+                            out.status.code().unwrap_or(-1),
+                            stdout,
+                            stderr
+                        ),
+                    },
+                }
+            }
+            Err(e) => CommandResult {
                 command_type: CommandType::Shell,
                 block_index,
-                outcome: CommandOutcome::Success {
-                    summary: format!(
-                        "exit_code: {}\nstdout: {}\nstderr: {}",
-                        output.status.code().unwrap_or(-1),
-                        stdout,
-                        stderr
-                    ),
+                outcome: CommandOutcome::Failure {
+                    error: format!("command spawn error: {}", e),
                 },
-            }
+            },
         }
-        Ok(Ok(Err(e))) => CommandResult {
-            command_type: CommandType::Shell,
-            block_index,
-            outcome: CommandOutcome::Failure {
-                error: format!("command spawn error: {}", e),
-            },
-        },
-        Err(_) => CommandResult {
-            command_type: CommandType::Shell,
-            block_index,
-            outcome: CommandOutcome::Failure {
-                error: "command timed out".into(),
-            },
-        },
-        _ => CommandResult {
-            command_type: CommandType::Shell,
-            block_index,
-            outcome: CommandOutcome::Failure {
-                error: "unexpected error".into(),
-            },
-        },
-    };
+    })
+    .await;
 
-    Some(result)
+    match result {
+        Ok(r) => Some(r),
+        Err(_) => Some(CommandResult {
+            command_type: CommandType::Shell,
+            block_index,
+            outcome: CommandOutcome::Failure {
+                error: if timeout_dur.as_secs() <= 10 {
+                    "command timed out quickly (10s). Try using rg instead of find, or use is_async=true.".into()
+                } else {
+                    "command timed out. Consider using is_async=true for long-running commands."
+                        .into()
+                },
+            },
+        }),
+    }
 }
 
 async fn run_shell_async(command: &str, block_index: usize) -> Option<CommandResult> {
@@ -215,6 +220,11 @@ async fn run_shell_async(command: &str, block_index: usize) -> Option<CommandRes
             summary: "async exec the command, will notify when done".to_string(),
         },
     })
+}
+
+fn command_uses_find(cmd: &str) -> bool {
+    let lowered = cmd.to_lowercase();
+    lowered.starts_with("find ") || lowered.contains("| find ")
 }
 
 fn truncate_output(stdout: String, stderr: String) -> (String, String) {

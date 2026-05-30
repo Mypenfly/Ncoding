@@ -1,7 +1,5 @@
-#![allow(dead_code, unused_imports)]
-
 use std::path::{Path, PathBuf};
-use tracing::{info, warn};
+use tracing::warn;
 
 use super::syntax::{CommandOutcome, CommandResult, CommandType, SkillsBlock, SkillsMode};
 

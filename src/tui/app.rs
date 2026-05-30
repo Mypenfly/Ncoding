@@ -13,11 +13,14 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph, Wrap},
     Frame, Terminal,
 };
-use unicode_width::UnicodeWidthStr;
 use tokio::sync::mpsc;
+use unicode_width::UnicodeWidthStr;
+use tracing::info;
 
 use crate::{
     api::client::{DeepSeekClient, TuiEvent},
+    command::parser::CommandParser,
+    command::syntax::CommandResult,
     command::{execute_commands, format_command_results, CommandWatcher},
     config::loader::AppConfig,
     prompt::builder::PromptBuilder,
@@ -28,15 +31,20 @@ use super::theme::Theme;
 
 pub type TuiTerminal = Terminal<CrosstermBackend<io::Stdout>>;
 
+#[derive(Clone, Copy, PartialEq)]
+enum AppState {
+    Working,
+    Stop,
+}
+
 pub struct App {
     config: AppConfig,
     api_client: DeepSeekClient,
-    #[allow(dead_code)]
-    prompt_builder: PromptBuilder,
     cmd_watcher: CommandWatcher,
     session_mgr: SessionManager,
     max_ctx: usize,
     auto_continue_count: u32,
+    state: AppState,
     input: String,
     cursor_pos: usize,
     scroll_offset: usize,
@@ -87,11 +95,13 @@ impl App {
         let session_name = format!("session-{}", chrono::Utc::now().format("%Y%m%d-%H%M%S"));
         let _ = session_mgr.new_session(&session_name);
         let system_prompt = prompt_builder.build();
-        session_mgr.add_message(Message {
-            role: Role::System,
-            content: Some(system_prompt),
-            reasoning_content: None,
-        }).ok();
+        session_mgr
+            .add_message(Message {
+                role: Role::System,
+                content: Some(system_prompt),
+                reasoning_content: None,
+            })
+            .ok();
 
         let max_ctx = config.session.max_context_messages;
         let status_text = format!(
@@ -103,11 +113,11 @@ impl App {
 
         Self {
             api_client,
-            prompt_builder,
             cmd_watcher: CommandWatcher::new(),
             session_mgr,
             max_ctx,
             auto_continue_count: 0,
+            state: AppState::Stop,
             input: String::new(),
             cursor_pos: 0,
             scroll_offset: 0,
@@ -145,26 +155,23 @@ impl App {
                     }
 
                     match key.code {
-                        KeyCode::Enter
-                            if !self.input.is_empty() => {
-                                let input_text = std::mem::take(&mut self.input);
-                                self.cursor_pos = 0;
-                                if input_text.starts_with('/') {
-                                    self.handle_slash_command(input_text).await;
-                                } else {
-                                    self.handle_user_input(input_text).await;
-                                }
+                        KeyCode::Enter if !self.input.is_empty() => {
+                            let input_text = std::mem::take(&mut self.input);
+                            self.cursor_pos = 0;
+                            if input_text.starts_with('/') {
+                                self.handle_slash_command(input_text).await;
+                            } else {
+                                self.handle_user_input(input_text).await;
                             }
-                        KeyCode::Char(c)
-                            if self.cursor_pos <= self.input.len() => {
-                                self.input.insert(self.cursor_pos, c);
-                                self.cursor_pos += c.len_utf8();
-                            }
-                        KeyCode::Backspace
-                            if self.cursor_pos > 0 => {
-                                self.cursor_pos = self.prev_char_boundary(self.cursor_pos);
-                                self.input.remove(self.cursor_pos);
-                            }
+                        }
+                        KeyCode::Char(c) if self.cursor_pos <= self.input.len() => {
+                            self.input.insert(self.cursor_pos, c);
+                            self.cursor_pos += c.len_utf8();
+                        }
+                        KeyCode::Backspace if self.cursor_pos > 0 => {
+                            self.cursor_pos = self.prev_char_boundary(self.cursor_pos);
+                            self.input.remove(self.cursor_pos);
+                        }
                         KeyCode::Left if self.cursor_pos > 0 => {
                             self.cursor_pos = self.prev_char_boundary(self.cursor_pos);
                         }
@@ -203,6 +210,14 @@ impl App {
         self.session_mgr.truncate_context(self.max_ctx);
     }
 
+    fn slash_reply(&mut self, text: String) {
+        self.session_mgr.add_message(Message {
+            role: Role::Info,
+            content: Some(text),
+            reasoning_content: None,
+        }).ok();
+    }
+
     fn msgs(&self) -> Vec<Message> {
         self.session_mgr.messages()
     }
@@ -215,40 +230,52 @@ impl App {
         let workspace = std::env::current_dir()
             .map(|p| p.display().to_string())
             .unwrap_or_else(|_| "?".into());
+        let state_str = match self.state {
+            AppState::Working => "working",
+            AppState::Stop => "stop",
+        };
         self.status_text = format!(
-            "{} · {} · {} · thinking",
+            "{} · {} · {} · {}",
             workspace,
             self.config.api.model,
             self.session_mgr.current_name().unwrap_or("new"),
+            state_str,
         );
     }
 
     async fn handle_user_input(&mut self, input_text: String) {
+        if self.cmd_watcher.has_pending() {
+            self.slash_reply("Commands still running, please wait...".into());
+            return;
+        }
+
+        let trimmed = input_text.trim();
+        if trimmed.starts_with("<<<[") {
+            let mut parser = CommandParser::new();
+            let (cmds, final_pos) = parser.extract_commands_from_final(trimmed, 0);
+            if !cmds.is_empty() && trimmed[final_pos..].trim().is_empty() {
+                let results = execute_commands(cmds).await;
+                let injection = format_command_results(&results);
+                if !injection.is_empty() {
+                    self.push_msg(Message {
+                        role: Role::Assistant,
+                        content: Some(injection),
+                        reasoning_content: None,
+                    });
+                }
+                return;
+            }
+        }
+
         self.push_msg(Message {
             role: Role::User,
             content: Some(input_text.clone()),
             reasoning_content: None,
         });
 
-        if self.auto_continue_count == 0 {
-            let current = self.session_mgr.current_name().unwrap_or("");
-            if current.starts_with("session-") && current.len() > 20 {
-                if let Ok(name) = self
-                    .api_client
-                    .generate_session_name(&input_text, &self.config.api.sub_model)
-                    .await
-                {
-                    if let Ok(()) = self.session_mgr.rename_session(&name) {
-                        self.update_status();
-                    }
-                }
-            }
-            self.auto_continue_count = 0;
-        }
-
         self.auto_continue_count = 0;
         self.auto_scroll = true;
-        self.continue_conversation().await;
+        self.continue_conversation();
     }
 
     async fn handle_tui_event(&mut self, event: TuiEvent) {
@@ -277,17 +304,18 @@ impl App {
             }
             TuiEvent::Error(err) => {
                 self.is_streaming = false;
-                self.push_msg(Message {
-                    role: Role::Assistant,
-                    content: Some(format!("[Error] {}", err)),
-                    reasoning_content: None,
-                });
+                self.state = AppState::Stop;
+                self.slash_reply(format!("[Error] {}", err));
+            }
+            TuiEvent::CommandsCompleted { results } => {
+                self.handle_commands_completed(results).await;
             }
         }
     }
 
     async fn handle_stream_done(&mut self) {
         self.is_streaming = false;
+        self.state = AppState::Working;
 
         let assistant_content = std::mem::take(&mut self.content_text);
         let reasoning = std::mem::take(&mut self.thinking_text);
@@ -305,30 +333,60 @@ impl App {
             });
         }
 
-        let commands = self.cmd_watcher.finalize();
-        if !commands.is_empty() {
-            let results = execute_commands(commands).await;
-            let injection = format_command_results(&results);
+        let remaining = self.cmd_watcher.finalize();
+        let mut cmd_watcher = std::mem::take(&mut self.cmd_watcher);
+        let tx = self.tui_tx.clone();
+        tokio::spawn(async move {
+            let mut results: Vec<CommandResult> = Vec::new();
+            if !remaining.is_empty() {
+                results.append(&mut execute_commands(remaining).await);
+            }
+            results.append(&mut cmd_watcher.drain_results().await);
+            let _ = tx.send(TuiEvent::CommandsCompleted { results });
+        });
+    }
 
+    async fn handle_commands_completed(&mut self, results: Vec<CommandResult>) {
+        if !results.is_empty() {
+            let injection = format_command_results(&results);
             if !injection.is_empty() {
                 self.push_msg(Message {
                     role: Role::User,
                     content: Some(injection),
                     reasoning_content: None,
                 });
-
-                if self.auto_continue_count < 5 {
+                if self.auto_continue_count < 20 {
                     self.auto_continue_count += 1;
-                    self.continue_conversation().await;
+                    self.continue_conversation();
                 }
+            }
+        } else {
+            if self.auto_continue_count < 20 && crate::command::checklist::has_unfinished() {
+                if let Some(summary) = crate::command::checklist::unfinished_summary() {
+                    self.push_msg(Message {
+                        role: Role::User,
+                        content: Some(summary),
+                        reasoning_content: None,
+                    });
+                    self.auto_continue_count += 1;
+                    self.continue_conversation();
+                } else {
+                    self.state = AppState::Stop;
+                }
+            } else {
+                self.state = AppState::Stop;
             }
         }
     }
 
-    async fn continue_conversation(&mut self) {
+    fn continue_conversation(&mut self) {
+        let msg_count = self.msgs().len();
+        info!("API request: sending {} messages to model {}", msg_count, self.config.api.model);
+
         self.thinking_text.clear();
         self.content_text.clear();
         self.is_streaming = true;
+        self.state = AppState::Working;
         self.cmd_watcher.clear();
 
         let client = self.api_client.clone();
@@ -382,7 +440,7 @@ impl App {
                 /session current - show current\n\
                 /undo - undo last turn";
                 self.push_msg(Message {
-                    role: Role::Assistant,
+                    role: Role::Info,
                     content: Some(help.into()),
                     reasoning_content: None,
                 });
@@ -399,14 +457,14 @@ impl App {
                 match removed {
                     Some((_u, _a)) => {
                         self.push_msg(Message {
-                            role: Role::Assistant,
+                            role: Role::Info,
                             content: Some("[undo] removed last turn".into()),
                             reasoning_content: None,
                         });
                     }
                     None => {
                         self.push_msg(Message {
-                            role: Role::Assistant,
+                            role: Role::Info,
                             content: Some("[undo] nothing to undo".into()),
                             reasoning_content: None,
                         });
@@ -415,16 +473,18 @@ impl App {
             }
             "/model" | "/skills" => {
                 self.push_msg(Message {
-                    role: Role::Assistant,
+                    role: Role::Info,
                     content: Some(format!("{}: coming in Phase 3", cmd)),
                     reasoning_content: None,
                 });
             }
             _ => {
                 self.push_msg(Message {
-                    role: Role::Assistant,
-                    content: Some(format!("unknown command: {}. Type /help for available commands.",
-                        cmd)),
+                    role: Role::Info,
+                    content: Some(format!(
+                        "unknown command: {}. Type /help for available commands.",
+                        cmd
+                    )),
                     reasoning_content: None,
                 });
             }
@@ -433,46 +493,50 @@ impl App {
 
     async fn handle_session_cmd(&mut self, sub: &str, parts: &[&str]) {
         match sub {
-            "list" => {
-                match self.session_mgr.list_sessions() {
-                    Ok(sessions) => {
-                        if sessions.is_empty() {
-                            self.push_msg(Message {
-                                role: Role::Assistant,
-                                content: Some("No sessions found.".into()),
-                                reasoning_content: None,
-                            });
-                        } else {
-                            let mut out = String::from("Sessions:\n");
-                            for (name, updated) in &sessions {
-                                let current_mark = if Some(name.as_str()) == self.session_mgr.current_name() {
+            "list" => match self.session_mgr.list_sessions() {
+                Ok(sessions) => {
+                    if sessions.is_empty() {
+                        self.push_msg(Message {
+                            role: Role::Info,
+                            content: Some("No sessions found.".into()),
+                            reasoning_content: None,
+                        });
+                    } else {
+                        let mut out = String::from("Sessions:\n");
+                        for (name, updated) in &sessions {
+                            let current_mark =
+                                if Some(name.as_str()) == self.session_mgr.current_name() {
                                     " *"
                                 } else {
                                     ""
                                 };
-                                out.push_str(&format!("  {} ({}){}\n", name, updated.format("%Y-%m-%d %H:%M"), current_mark));
-                            }
-                            self.push_msg(Message {
-                                role: Role::Assistant,
-                                content: Some(out),
-                                reasoning_content: None,
-                            });
+                            out.push_str(&format!(
+                                "  {} ({}){}\n",
+                                name,
+                                updated.format("%Y-%m-%d %H:%M"),
+                                current_mark
+                            ));
                         }
-                    }
-                    Err(e) => {
                         self.push_msg(Message {
-                            role: Role::Assistant,
-                            content: Some(format!("Error listing sessions: {}", e)),
+                            role: Role::Info,
+                            content: Some(out),
                             reasoning_content: None,
                         });
                     }
                 }
-            }
+                Err(e) => {
+                    self.push_msg(Message {
+                        role: Role::Info,
+                        content: Some(format!("Error listing sessions: {}", e)),
+                        reasoning_content: None,
+                    });
+                }
+            },
             "switch" => {
                 let name = parts.get(2).copied().unwrap_or("");
                 if name.is_empty() {
                     self.push_msg(Message {
-                        role: Role::Assistant,
+                        role: Role::Info,
                         content: Some("Usage: /session switch <name>".into()),
                         reasoning_content: None,
                     });
@@ -483,14 +547,18 @@ impl App {
                         self.update_status();
                         let msgs = self.msgs();
                         self.push_msg(Message {
-                            role: Role::Assistant,
-                            content: Some(format!("Switched to session '{}' ({} messages)", name, msgs.len())),
+                            role: Role::Info,
+                            content: Some(format!(
+                                "Switched to session '{}' ({} messages)",
+                                name,
+                                msgs.len()
+                            )),
                             reasoning_content: None,
                         });
                     }
                     Err(e) => {
                         self.push_msg(Message {
-                            role: Role::Assistant,
+                            role: Role::Info,
                             content: Some(format!("Failed to switch: {}", e)),
                             reasoning_content: None,
                         });
@@ -501,7 +569,7 @@ impl App {
                 let new_name = parts.get(2).copied().unwrap_or("");
                 if new_name.is_empty() {
                     self.push_msg(Message {
-                        role: Role::Assistant,
+                        role: Role::Info,
                         content: Some("Usage: /session rename <new_name>".into()),
                         reasoning_content: None,
                     });
@@ -511,14 +579,14 @@ impl App {
                     Ok(()) => {
                         self.update_status();
                         self.push_msg(Message {
-                            role: Role::Assistant,
+                            role: Role::Info,
                             content: Some(format!("Renamed to '{}'", new_name)),
                             reasoning_content: None,
                         });
                     }
                     Err(e) => {
                         self.push_msg(Message {
-                            role: Role::Assistant,
+                            role: Role::Info,
                             content: Some(format!("Rename failed: {}", e)),
                             reasoning_content: None,
                         });
@@ -529,7 +597,7 @@ impl App {
                 let name = parts.get(2).copied().unwrap_or("");
                 if name.is_empty() {
                     self.push_msg(Message {
-                        role: Role::Assistant,
+                        role: Role::Info,
                         content: Some("Usage: /session delete <name>".into()),
                         reasoning_content: None,
                     });
@@ -537,7 +605,7 @@ impl App {
                 }
                 if Some(name) == self.session_mgr.current_name() {
                     self.push_msg(Message {
-                        role: Role::Assistant,
+                        role: Role::Info,
                         content: Some("Cannot delete current session. Switch first.".into()),
                         reasoning_content: None,
                     });
@@ -546,14 +614,14 @@ impl App {
                 match self.session_mgr.delete_session(name) {
                     Ok(()) => {
                         self.push_msg(Message {
-                            role: Role::Assistant,
+                            role: Role::Info,
                             content: Some(format!("Deleted session '{}'", name)),
                             reasoning_content: None,
                         });
                     }
                     Err(e) => {
                         self.push_msg(Message {
-                            role: Role::Assistant,
+                            role: Role::Info,
                             content: Some(format!("Delete failed: {}", e)),
                             reasoning_content: None,
                         });
@@ -564,14 +632,18 @@ impl App {
                 let name = self.session_mgr.current_name().unwrap_or("none");
                 let msgs = self.msgs();
                 self.push_msg(Message {
-                    role: Role::Assistant,
-                    content: Some(format!("Current session: '{}' ({} messages)", name, msgs.len())),
+                    role: Role::Info,
+                    content: Some(format!(
+                        "Current session: '{}' ({} messages)",
+                        name,
+                        msgs.len()
+                    )),
                     reasoning_content: None,
                 });
             }
             _ => {
                 self.push_msg(Message {
-                    role: Role::Assistant,
+                    role: Role::Info,
                     content: Some("Usage: /session [list|switch|rename|delete|current]".into()),
                     reasoning_content: None,
                 });
@@ -623,6 +695,27 @@ impl App {
         let title_p = Paragraph::new(title_line).block(title_block);
         f.render_widget(title_p, chunks[0]);
 
+        let state_label = match self.state {
+            AppState::Working => " WORKING ",
+            AppState::Stop => " STOP ",
+        };
+        let state_style = match self.state {
+            AppState::Working => Style::default().fg(theme.red).add_modifier(Modifier::BOLD),
+            AppState::Stop => Style::default().fg(theme.green).add_modifier(Modifier::BOLD),
+        };
+        let state_line = Line::from(Span::styled(
+            state_label,
+            state_style.add_modifier(Modifier::BOLD),
+        ));
+        let state_width = state_label.len() as u16;
+        let state_area = ratatui::layout::Rect {
+            x: chunks[0].right().saturating_sub(state_width),
+            y: chunks[0].y,
+            width: state_width.min(chunks[0].width),
+            height: 1,
+        };
+        f.render_widget(Paragraph::new(state_line).block(Block::default()), state_area);
+
         let text_area = chunks[1];
         let mut lines: Vec<Line> = Vec::new();
 
@@ -655,20 +748,27 @@ impl App {
                     if let Some(ref reasoning) = msg.reasoning_content {
                         if !reasoning.is_empty() {
                             for rline in reasoning.lines() {
-                                lines.push(Line::from(Span::styled(
-                                    if rline.trim().is_empty() {
-                                        String::new()
-                                    } else {
-                                        format!("<< {} >>", rline)
-                                    },
-                                    Style::default().fg(theme.grey2),
-                                )));
+                                if !rline.trim().is_empty() {
+                                    lines.push(Line::from(Span::styled(
+                                        rline,
+                                        Style::default().fg(theme.grey2),
+                                    )));
+                                }
                             }
                         }
                     }
                     let text = msg.content.as_deref().unwrap_or("");
                     for line_str in text.lines() {
                         lines.push(self.render_content_line(line_str, &theme));
+                    }
+                }
+                Role::Info => {
+                    let text = msg.content.as_deref().unwrap_or("");
+                    for line_str in text.lines() {
+                        lines.push(Line::from(Span::styled(
+                            line_str,
+                            Style::default().fg(theme.grey2),
+                        )));
                     }
                 }
             }
@@ -679,7 +779,7 @@ impl App {
                 for rline in self.thinking_text.lines() {
                     if !rline.trim().is_empty() {
                         lines.push(Line::from(Span::styled(
-                            format!("<< {} >>", rline),
+                            rline,
                             Style::default().fg(theme.grey2),
                         )));
                     }
@@ -704,10 +804,7 @@ impl App {
             self.scroll_offset
         };
 
-        let visible_lines: Vec<Line> = lines
-            .into_iter()
-            .skip(effective_offset)
-            .collect();
+        let visible_lines: Vec<Line> = lines.into_iter().skip(effective_offset).collect();
 
         let text_widget = Paragraph::new(Text::from(visible_lines))
             .block(Block::default())
@@ -720,10 +817,7 @@ impl App {
         } else {
             &self.token_info
         };
-        let token_line = Line::from(Span::styled(
-            token_text,
-            Style::default().fg(theme.orange),
-        ));
+        let token_line = Line::from(Span::styled(token_text, Style::default().fg(theme.orange)));
         f.render_widget(
             Paragraph::new(token_line).block(Block::default()),
             token_bar,
@@ -776,12 +870,16 @@ impl App {
         } else if trimmed.starts_with('#') {
             Line::from(Span::styled(
                 line,
-                Style::default().fg(theme.orange).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(theme.orange)
+                    .add_modifier(Modifier::BOLD),
             ))
         } else if trimmed.starts_with('`') && trimmed.ends_with('`') && trimmed.len() > 2 {
             Line::from(Span::styled(
                 line,
-                Style::default().fg(theme.aqua).add_modifier(Modifier::ITALIC),
+                Style::default()
+                    .fg(theme.aqua)
+                    .add_modifier(Modifier::ITALIC),
             ))
         } else {
             Line::from(Span::styled(line, Style::default().fg(theme.fg)))
@@ -810,6 +908,9 @@ fn resolve_api_key(api: &crate::config::loader::ApiConfig) -> String {
         return env_val;
     }
 
-    tracing::warn!("No API key found. Set api_key in config or set {} env var.", api.api_key_env);
+    tracing::warn!(
+        "No API key found. Set api_key in config or set {} env var.",
+        api.api_key_env
+    );
     String::new()
 }

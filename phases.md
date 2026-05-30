@@ -1,6 +1,6 @@
 # N-coding 工作阶段划分
 
-> 基于 `docs/ncoding.md` 第 11 节开发路线图，每个阶段内部按目录/模块拆分具体任务。
+> 基于 `docs/narwhal_dev.md` 中的命令系统和架构设计。每个阶段按目录/模块拆分具体任务。
 
 ---
 
@@ -12,94 +12,102 @@
 
 | 模块 | 文件 | 实现内容 |
 |------|------|---------|
-| `src/config/` | `loader.rs` | KDL 配置加载，三级优先级合并（工作目录 `.ncoding/n_coding.kdl` > 全局 `~/.config/ncoding/config.kdl` > 默认值），robust 解析（完整文档解析失败时回退到逐节解析） |
-| `src/api/` | `client.rs` | DeepSeek API SSE 流式客户端，reasoning_content 与 content 分离并正确拼接，stream_chat 双通道输出（TUI + CommandWatcher），`list_models()` 模型列表，`generate_session_name()` session 命名 |
-| `src/tui/` | `app.rs` | 完整 TUI：5 区域布局（标题栏/文本区/Token栏/输入框/状态栏），Everforest 配色，流式渲染（reasoning 灰、content 正文），自动滚动，UTF-8 中文输入支持，光标显示，slash 指令，SessionManager 集成 |
-| | `input.rs` | `InputState`，中文字符安全操作（byte-boundary-aware 插入/删除/移动） |
-| | `render.rs` | Markdown 基础渲染（代码块/标题/内联代码） |
+| `src/config/` | `loader.rs` | KDL 配置加载，三级优先级合并（`.ncoding/n_coding.kdl` > `~/.config/ncoding/config.kdl` > 默认值），robust 解析 |
+| `src/api/` | `client.rs` | DeepSeek API SSE 流式，reasoning_content 分离回传，双通道输出（TUI + CommandWatcher），`list_models()`，`generate_session_name()` |
+| `src/tui/` | `app.rs` | 5区布局（标题/文本/Token/输入/状态），Everforest 主题，流式渲染，UTF-8 + 中文输入，自动滚动，slash 指令 |
 | | `theme.rs` | Everforest 暗色主题色彩常量 |
-| `src/command/` | `parser.rs` | `<<<[Command]>>>` 正则解析器（5种命令类型块提取、`---` 分隔、`__END__` 截止、命令名标准化） |
-| | `syntax.rs` | 数据结构：NCommand, ShellBlock, FileOpBlock, ToolCallBlock, SubAgentBlock, SkillsBlock, CommandResult |
-| | `shell.rs` | nu 同步/异步执行，安全审查（sudo/rm-rf/chmod/dd 拦截），输出截断（>100行保留头尾），PATH 查找 nu |
-| | `files_operator.rs` | Read（带行号/offset/limit）、Write（创建/覆盖）、Edit（精确字符串替换+唯一性检查） |
-| | `tool_call.rs` | 外部工具调用：从 KDL 配置读取工具定义，通过环境变量 `NCODING_TOOL_ARGS`(JSON) 传递参数，支持任意语言（Python/Shell/等） |
-| | `mod.rs` | CommandWatcher（流式 buffer 监听+解析），命令执行调度，结果格式化注入 `<(<(SYSTEM ... )>)>` |
-| `src/prompt/` | `builder.rs` | 系统提示词组装：character + command_grammar + shell + files_operator + 工具定义 |
-| `src/main.rs` | | 日志重定向至 `.ncoding/n-coding.log`，完整集成布线 |
+| `src/command/` | `parser.rs` | `<<<[Command]>>>` 正则解析器，5→7 种命令类型，`---` 分隔、`__END__` 截止、命令名标准化 |
+| | `syntax.rs` | 数据结构：NCommand, ShellBlock, FileOpBlock, ToolCallBlock, SubAgentBlock, SkillsBlock, CheckListBlock, AgentLogsBlock, CommandResult |
+| | `shell.rs` | nu 同步/异步执行 (tokio::process)，安全审查，输出截断(>100行) |
+| | `files_operator.rs` | Read(行号+offset/limit)、Write、Edit(精确替换+唯一性检查) |
+| | `mod.rs` | CommandWatcher（流式监听+中流提取+非阻塞收集），命令调度，结果格式化 |
+| `src/prompt/` | `builder.rs` | 系统提示词：character + grammar + 7 种命令文档 + 外部工具 |
+| `src/main.rs` | | 日志落盘 `.ncoding/n-coding.log`(重置)，完整集成 |
 
 ### 对话循环
 
 ```
 用户输入 → add user msg → continue_conversation()
   ↓
-API stream → TUI 流式显示 + CommandWatcher 监听
+API SSE stream → TUI 流式显示 + CommandWatcher 中流监听
   ↓
-API 结束 → add assistant msg (reasoning + content)
+StreamDone → save assistant msg → tokio::spawn(drain_results) → 非阻塞
   ↓
-命令? → execute_commands() → format → inject user msg → auto continue (最多 5 次)
+CommandsCompleted → format results → inject user msg → auto continue (≤20次)
   ↓
-回到 TUI 等待输入
+无命令且无未完成 CheckList → AppState::Stop
 ```
 
-### 命令系统
+### 命令系统特性
+
+- **双向性**：assistant 流式输出中识别命令；user 直接输入纯命令时直接执行不调 API
+- **即时性**：中流遇到 `<<<[__END__]>>>` 立即 spawn 执行，无需等模型输出结束
+- **非阻塞**：`drain_results` 在后台 tokio task 中收集，不阻塞 TUI 事件循环
+- **参数完整**：中流解析仅在有下一标记符（`__END__` 或下一个命令）时才构建命令，防止参数不完整
+
+---
+
+## Phase 2: 命令体系完善 ✅ 完成
+
+| 步骤 | 任务 | 状态 |
+|------|------|------|
+| 2.1 | Shell — 同步/异步执行，安全审查(sudo/rm-rf/chmod/dd)，输出截断 | ✅ |
+| 2.2 | Shell — `find` 命令 10s 短超时 | ✅ |
+| 2.3 | FilesOperator — Read（行号+offset/limit）、Write（创建/覆盖）、Edit（精确替换） | ✅ |
+| 2.4 | ToolCall — 外部工具调用，KDL 配置，CLI-arg JSON 传参，并行执行 | ✅ |
+| 2.5 | SubAgentTask — 独立上下文任务委派 | ✅ |
+| 2.6 | AgentSkills — list/load，工作目录+全局目录扫描 | ✅ |
+| 2.7 | **CheckList** — 任务规划器，create/update/list，`.ncoding/checklist.json`，未完成任务自动继续 | ✅ |
+| 2.8 | **AgentLogs** — 开发日志，write/read/list，`.ncoding/agent_logs/` | ✅ |
+| 2.9 | 提示词模板 — 7 种命令完整文档 | ✅ |
+| 2.10 | CommandWatcher — 中流提取 + 非阻塞收集 | ✅ |
+
+### 命令执行流程
 
 ```
-build: cargo build        # 0 warnings
-test:  cargo test         # 74 passed
-lint:  cargo clippy -- -D warnings  # clean
+模型输出 token → feed_token(buffer)
+  ↓
+extract_commands_from (non-final) → 有 __END__ 时解析 body
+  ↓
+build_command → NCommand variant
+  ↓
+tokio::spawn(execute_commands) → 异步执行
+  ↓
+drain_results (background task) → 收集 CommandResult
+  ↓
+format_command_results → <(<(SYSTEM...[Result])>)>
 ```
 
 ---
 
-## Phase 2: 完善命令体系 ✅ 部分完成
+## Phase 3: Session + 日志 + 状态 ✅ 完成
 
 | 步骤 | 任务 | 状态 |
 |------|------|------|
-| 2.1 | FilesOperator - Read（文件读取 + 行号返回） | ✅ |
-| 2.2 | FilesOperator - Write（创建/覆盖文件） | ✅ |
-| 2.3 | FilesOperator - Edit（精确字符串替换 + 唯一性检查） | ✅ |
-| 2.4 | ToolCall 外部工具调用（KDL 配置定义 + 环境变量传参） | ✅ |
-| 2.5 | SubAgentTask（独立上下文，禁止循环） | ⬜ 占位 (Phase 3) |
-| 2.6 | AgentSkills（list/load，工作目录 + 全局目录扫描） | ⬜ 占位 (Phase 3) |
-| 2.7 | 提示词模板 | ✅ |
-
----
-
-## Phase 3: Session + TUI 交互完善 ✅ 部分完成
-
-| 步骤 | 任务 | 状态 |
-|------|------|------|
-| 3.1 | Session JSON 文件读写（`.ncoding/sessions/`） | ✅ |
+| 3.1 | Session JSON 持久化（`.ncoding/sessions/<name>.json`） | ✅ |
 | 3.2 | Session 自动命名（首次输入 → flash API → slug） | ✅ |
-| 3.3 | Shell is_async 模式（后台执行 + 即时返回） | ⬜ 占位 |
-| 3.4 | Shell 安全审查完善 | ✅ |
-| 3.5 | Slash 指令：`/session list\|switch\|rename\|delete\|current`，`/undo`，`/help`，`/clear`，`/quit` | ✅ |
-| 3.6 | `/model` 切换面板 | ⬜ 占位 |
-| 3.7 | Session 切换上下文加载 | ✅ |
-| 3.8 | `/undo` 撤回机制 | ✅ |
-| 3.9 | Token 信息栏（usage 解析） | ✅ |
-| 3.10 | 终端 resize 自适应 | ⬜ |
-
-### Session 管理功能
-
-- **持久化**: `.ncoding/sessions/<name>.json`
-- **自动命名**: 首次输入 → `generate_session_name()` 通过 flash API 生成英文 slug
-- **Slash 指令**: `/session list` (列表), `/session switch` (切换), `/session rename` (重命名), `/session delete` (删除), `/session current` (当前信息), `/undo` (撤轮)
-- **上下文截断**: `max_context_messages` 限制，保留 system prompt + 最近 N 条
-- **状态栏**: 显示当前 session 名称
+| 3.3 | Session 切换、重命名、删除、列表 | ✅ |
+| 3.4 | `/undo` 撤回机制（轮次级） | ✅ |
+| 3.5 | `/clear`、`/help`、`/quit` 指令 | ✅ |
+| 3.6 | Token 信息栏（usage 解析 + cache hit 比例） | ✅ |
+| 3.7 | 上下文截断（max_context_messages） | ✅ |
+| 3.8 | 日志系统 — info 级别，API 请求/命令解析/命令执行记录 | ✅ |
+| 3.9 | 状态显示 — STOP(绿) / WORKING(红) 在标题栏右侧 | ✅ |
+| 3.10 | 输入 guard — 命令执行中阻止新用户输入 | ✅ |
 
 ---
 
-## Phase 4: 打磨与完善
+## Phase 4: 打磨与完善 ⬜ 进行中
 
 | 步骤 | 任务 | 状态 |
 |------|------|------|
-| 4.1 | Markdown 渲染完善 | ⬜ |
-| 4.2 | 命令块/结果 折叠展开 | ⬜ |
-| 4.3 | 错误处理完善 | ⬜ |
-| 4.4 | 日志系统 | ✅ |
-| 4.5 | Shell 环境信息注入 | ⬜ |
-| 4.6 | 大文件 read 截断提示 | ⬜ |
+| 4.1 | `/model` 面板切换 | ⬜ |
+| 4.2 | Markdown 渲染完善（表格、链接、图片） | ⬜ |
+| 4.3 | 命令块/结果 折叠展开 UI | ⬜ |
+| 4.4 | 终端 resize 自适应 | ⬜ |
+| 4.5 | Shell 环境信息注入（ShellEnvInfo + build_env_injection） | ⬜ |
+| 4.11 | 命令调用的双向性增强（用户消息中识别命令） | ⬜ |
+| 4.12 | `$` 命令行方式启动方案 | ⬜ |
 
 ---
 
@@ -108,11 +116,12 @@ lint:  cargo clippy -- -D warnings  # clean
 ```
 Phase 1 (MVP) ✅
     │
-    ├─→ Phase 2 (命令体系) ✅ 主要完成
+    ├─→ Phase 2 (命令体系 8 种命令) ✅
     │
-    ├─→ Phase 3 (Session + TUI) ✅ 主要完成
+    ├─→ Phase 3 (Session + 日志 + 状态) ✅
     │
-    └─→ Phase 4 (打磨) ⬜
+    └─→ Phase 4 (打磨 + narwhal 架构)
+            ├─ UI 增强 (model 面板, markdown, resize, 折叠)
 ```
 
 ---
@@ -122,10 +131,37 @@ Phase 1 (MVP) ✅
 | 目录 | Phase 1 | Phase 2 | Phase 3 | Phase 4 |
 |------|:---:|:---:|:---:|:---:|
 | `src/config/` | ★ | | | |
-| `src/api/` | ★ | | ☆ | |
-| `src/tui/` | ★ | ☆ | ★ | |
-| `src/command/` | ★ | ★ | ☆ | ★ |
-| `src/session/` | | | ★ | |
+| `src/api/` | ★ | | ★ | |
+| `src/tui/` | ★ | | ★ | ★ |
+| `src/command/` | ★ | ★ | ★ | ★ |
+| `src/session/` | | | ★ | ★ |
 | `src/prompt/` | ★ | ★ | | |
 
-> ★ = 已完成，☆ = 部分完成，⬜ = 未开始
+> ★ = 已完成，⬜ = 未开始
+
+---
+
+## 命令速查
+
+| 命令 | 参数 | 用途 | 文件 |
+|------|------|------|------|
+| Shell | command, is_async | nushell 命令执行 | `shell.rs` |
+| FilesOperator | mode(read/write/edit), path, content, old_str, new_str, offset, limit | 文件读写编辑 | `files_operator.rs` |
+| ToolCall | tool_name, args... | 外部工具调用(CLI-arg JSON) | `tool_call.rs` |
+| SubAgentTask | prompt | 子 agent 任务委派 | `sub_agent_task.rs` |
+| AgentSkills | mode(list/load), skill_name | 技能发现与加载 | `agent_skills.rs` |
+| CheckList | mode(create/update/list), id, title, status, content | 任务规划与跟踪 | `checklist.rs` |
+| AgentLogs | mode(write/read/list), filename, content | 开发日志读写 | `agent_logs.rs` |
+
+---
+
+## 技术债 / 待清理
+
+| 项目 | 说明 |
+|------|------|
+| `src/tui/input.rs` | InputState 模块未使用，app.rs 内联处理输入 |
+| `src/tui/model_panel.rs` | ModelPanel 未使用，Phase 4 中实现 |
+| `src/tui/render.rs` | MarkdownRenderer 未使用，Phase 4 中完善 |
+| `src/session/backup.rs` | BackupManager 未使用，Phase 3 `/undo` 内联实现 |
+| `src/api/client.rs` | `list_models`、`generate_session_name` 通过 `#[allow(dead_code)]` 保留 |
+| `src/prompt/builder.rs` | `build_env_injection`、`ShellEnvInfo` 预留给 Phase 4.5 |

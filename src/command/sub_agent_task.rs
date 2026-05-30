@@ -1,6 +1,4 @@
-#![allow(dead_code, unused_imports)]
-
-use tracing::{debug, info};
+use tracing::info;
 
 use super::syntax::{CommandOutcome, CommandResult, CommandType, SubAgentBlock};
 

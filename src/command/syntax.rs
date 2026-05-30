@@ -1,5 +1,3 @@
-#![allow(dead_code, unused_imports)]
-
 use std::{collections::HashMap, path::PathBuf};
 
 #[derive(Debug, Clone)]
@@ -9,6 +7,8 @@ pub enum NCommand {
     ToolCall { blocks: Vec<ToolCallBlock> },
     SubAgentTask { blocks: Vec<SubAgentBlock> },
     AgentSkills { blocks: Vec<SkillsBlock> },
+    CheckList { blocks: Vec<CheckListBlock> },
+    AgentLogs { blocks: Vec<AgentLogsBlock> },
 }
 
 #[derive(Debug, Clone)]
@@ -45,6 +45,36 @@ pub struct SkillsBlock {
     pub skill_name: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+pub struct CheckListBlock {
+    pub mode: CheckListMode,
+    pub id: Option<String>,
+    pub title: Option<String>,
+    pub status: Option<String>,
+    pub content: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CheckListMode {
+    Create,
+    Update,
+    List,
+}
+
+#[derive(Debug, Clone)]
+pub struct AgentLogsBlock {
+    pub mode: AgentLogsMode,
+    pub filename: Option<String>,
+    pub content: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentLogsMode {
+    Write,
+    Read,
+    List,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FileMode {
     Read,
@@ -58,15 +88,6 @@ pub enum SkillsMode {
     Load,
 }
 
-#[derive(Debug, Clone)]
-pub enum CommandBlock {
-    Shell(ShellBlock),
-    FileOp(FileOpBlock),
-    ToolCall(ToolCallBlock),
-    SubAgent(SubAgentBlock),
-    Skills(SkillsBlock),
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CommandType {
     Shell,
@@ -74,6 +95,8 @@ pub enum CommandType {
     ToolCall,
     SubAgentTask,
     AgentSkills,
+    CheckList,
+    AgentLogs,
 }
 
 #[derive(Debug, Clone)]

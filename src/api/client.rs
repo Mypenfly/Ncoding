@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tracing::{debug, error, info};
 
+use crate::command::syntax::CommandResult;
 use crate::session::manager::Message;
 
 #[derive(Debug, Clone)]
@@ -83,6 +84,7 @@ pub enum TuiEvent {
     ReasoningChunk(String),
     ContentChunk(String),
     StreamDone { usage: Option<UsageInfo> },
+    CommandsCompleted { results: Vec<CommandResult> },
     Error(String),
 }
 
@@ -129,6 +131,7 @@ impl DeepSeekClient {
                     crate::session::manager::Role::System => "system".into(),
                     crate::session::manager::Role::User => "user".into(),
                     crate::session::manager::Role::Assistant => "assistant".into(),
+                    crate::session::manager::Role::Info => "user".into(),
                 },
                 reasoning_content: m.reasoning_content,
                 content: m.content,
@@ -269,7 +272,7 @@ impl DeepSeekClient {
         sub_model: &str,
     ) -> Result<String, anyhow::Error> {
         let prompt = format!(
-            "为以下对话生成一个简短的英文 slug 标题（2-5 词，小写，用连字符连接，不要带任何其他内容）：\n{}",
+            "为以下对话生成一个简短的 slug 标题（2-5 词，小写，用连字符连接，不要带任何其他内容,语言使用和下文一直的语言）：\n{}",
             user_input
         );
 
@@ -337,6 +340,7 @@ impl From<&crate::session::manager::Message> for ApiMessage {
                 crate::session::manager::Role::System => "system".into(),
                 crate::session::manager::Role::User => "user".into(),
                 crate::session::manager::Role::Assistant => "assistant".into(),
+                crate::session::manager::Role::Info => "user".into(),
             },
             reasoning_content: m.reasoning_content.clone(),
             content: m.content.clone(),
