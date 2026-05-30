@@ -55,7 +55,7 @@ impl PromptBuilder {
 
     pub fn build_env_injection(&self) -> String {
         format!(
-            "【|SYSTEM|】\nos: {}\nshell: {}\nworkspace: {}\ninstalled_tools: {}\navailable_skills: {}\n【|SYSTEM|】",
+            "【|Command/Tool|】\nos: {}\nshell: {}\nworkspace: {}\ninstalled_tools: {}\navailable_skills: {}\n【|Command/Tool|】",
             self.shell_env.os,
             self.shell_env.shell,
             self.shell_env.workspace,
@@ -70,7 +70,7 @@ impl PromptBuilder {
         } else {
             "你是 N-coding 系统的智能编码代理，身份为 Ncoder。\n\
              与普通对话不同：你需要通过特殊的输出格式与 N-coding 系统交互来完成编码工作。\n\
-             你的文本输出（包括中间的思考过程）会被流式解析，N-coding 系统从中提取命令并执行，然后将结果以 【|SYSTEM|】...【|SYSTEM|】 格式注入回对话。\n\
+             你的文本输出（包括中间的思考过程）会被流式解析，N-coding 系统从中提取命令并执行，然后将结果以 【|Command/Tool|】...【|Command/Tool|】 格式注入回对话。\n\
              因此，你不需要等待命令执行——系统会自动接收命令结果并继续对话。\n\
              在命令块中使用 character=Ncoder 标识自己；subagent 子任务时身份为 Subcoder。\n\
              修改代码前先读文件；回答简洁，优先给代码。"
@@ -130,7 +130,7 @@ impl PromptBuilder {
 
 1. 修改文件前，必须先用 FilesOperator read 读取文件内容
 2. 使用精确的 Edit 模式而非全量 Write
-3. old_str 必须与文件中的内容完全一致（包括缩进、空行）
+3. old_lines 应与文件中内容一致（忽略缩进和空格时的字符一致）
 4. 一次 Edit 只改一个逻辑点
 5. 修改完成后运行相关测试验证"#
             .into()
@@ -155,12 +155,13 @@ impl PromptBuilder {
 - 行内注释：/-...-/ ；块注释：//-...-//（注释掉整个命令）
 
 系统注入格式：
-执行命令后，系统会将结果以以下格式注入到对话中：
-【|SYSTEM|】
+执行命令后，系统会将结果以用户身份通过下列格式注入到对话中：
+(你调用的命令执行结果如下)
+【|Command/Tool|】
 [TypeResult]
 status: OK
 ...
-【|SYSTEM|】
+【|Command/Tool|】
 你的输出会被流式解析——不需要等待结果，系统会自动注入。"#
             .into()
     }
@@ -182,7 +183,7 @@ status: OK
 《[End]|Shell|》
 
 返回结果示例：
-【|SYSTEM|】
+【|Command/Tool|】
 [ShellResult]
 status: OK
 exit_code: 0
@@ -191,13 +192,13 @@ total 24
 -rw-r--r-- 1 user user 1234 main.rs
 stderr:
 (empty)
-【|SYSTEM|】
+【|Command/Tool|】
 
 示例 — 超时：
-【|SYSTEM|】
+【|Command/Tool|】
 [ShellResult]
 error: status: TIMEOUT (120s). Consider using is_async=true for long-running commands.
-【|SYSTEM|】
+【|Command/Tool|】
 
 关键规则：
 - 始终使用 bash 语法，它不是你最熟悉的 CLI 工具
@@ -223,14 +224,14 @@ error: status: TIMEOUT (120s). Consider using is_async=true for long-running com
 《[End]|FilesOperator|》
 
 返回示例：
-【|SYSTEM|】
+【|Command/Tool|】
 [FileResult]
 status: OK
 path: src/main.rs
 lines: 30..110
 30: fn main() {
 ...
-【|SYSTEM|】
+【|Command/Tool|】
 
 ### Write — 写入文件
 《[FilesOperator]|Ncoder|》
@@ -240,27 +241,52 @@ lines: 30..110
 《[End]|FilesOperator|》
 
 返回示例：
-【|SYSTEM|】
+【|Command/Tool|】
 [FileResult]
 status: OK
 path: src/new_file.rs
 action: created
-【|SYSTEM|】
+【|Command/Tool|】
 
-### Edit — 精确替换（必须先 read！）
-编辑前必须用 read 获取文件真实内容！
+### Edit — 行匹配替换（必须先 read！）
+
+编辑前必须用 read 获取文件真实内容。使用 old_lines/new_lines 进行基于行的代码块匹配，系统自动忽略所有空格、缩进、空行差异进行字符匹配。
+
+**示例 1 — 用 ... 省略无关代码：**
 《[FilesOperator]|Ncoder|》
 【mode】edit【mode】
-【path】src/parser.rs【path】
-【old_str】要替换的原始文本【old_str】
-【new_str】替换为的文本【new_str】
+【path】src/main.py【path】
+【old_lines】
+def multiply(a, b):
+        ...
+        return a *
+【old_lines】
+【new_lines】
+def multiply(a, b):
+        ...
+        return a * b
+【new_lines】
 《[End]|FilesOperator|》
 
-关键规则：
-- old_str 必须是文件中唯一出现且完全匹配（含缩进、空行）的文本
-- 先 read 再 edit，不允许凭空构造 old_str
-- 小范围精确编辑，不要全文件替换
-- 错误示例：未先用 read → old_str 不匹配 → "not found" 错误"#
+**示例 2 — 单行替换：**
+《[FilesOperator]|Ncoder|》
+【mode】edit【mode】
+【path】src/lib.rs【path】
+【old_lines】
+fn old_name(x: i32) -> String {
+【old_lines】
+【new_lines】
+fn new_name(x: i32) -> usize {
+【new_lines】
+《[End]|FilesOperator|》
+
+**关键规则：**
+- old_lines 的内容必须来自刚刚 read 的文件内容（字符一致），系统自动忽略空格和缩进差异
+- 使用 ... 省略不关心的行，减少输出 token，按函数等逻辑边界匹配更准确
+- 不要在 old_lines / new_lines 的首尾添加空行（系统会自动 trim）
+- new_lines 替换后自动保留原文件的缩进格式
+- 如果匹配失败，系统返回可能的行号供参考，此时增加更多相邻行作为上下文
+- 小范围精确编辑，不要全文件替换"#
             .into()
     }
 

@@ -124,8 +124,8 @@ impl App {
             api_client,
             cmd_watcher: CommandWatcher::new(),
             session_mgr,
-            auto_continue_count: 0,
             state: AppState::Stop,
+            auto_continue_count: 0,
             input_state: InputState::new(),
             scroll_offset: 0,
             auto_scroll: true,
@@ -421,13 +421,13 @@ impl App {
                     content: Some(injection),
                     reasoning_content: None,
                 });
-                if self.auto_continue_count < 20 {
+                if true {
                     self.auto_continue_count += 1;
                     self.continue_conversation();
                 }
             }
         } else {
-            if self.auto_continue_count < 20 && crate::command::checklist::has_unfinished() {
+            if crate::command::checklist::has_unfinished() {
                 if let Some(summary) = crate::command::checklist::unfinished_summary() {
                     self.push_msg(Message {
                         role: Role::User,
@@ -788,8 +788,12 @@ impl App {
         let text_area = chunks[1];
         let mut lines: Vec<Line> = Vec::new();
 
+        const MAX_RENDER_LINES: usize = 5000;
         let display_msgs = self.msgs();
         for msg in &display_msgs {
+            if lines.len() >= MAX_RENDER_LINES {
+                break;
+            }
             match msg.role {
                 Role::System => {
                     lines.push(Line::from(Span::styled(
@@ -799,7 +803,7 @@ impl App {
                 }
                 Role::User => {
                     let text = msg.content.as_deref().unwrap_or("");
-                    if text.starts_with("【|SYSTEM|】") {
+                    if text.starts_with("【|Command/Tool|】") || text.starts_with("(你调用的命令执行结果如下)") {
                         for line_str in text.lines() {
                             lines.push(Line::from(Span::styled(
                                 line_str,
@@ -828,6 +832,9 @@ impl App {
                     }
                     let text = msg.content.as_deref().unwrap_or("");
                     for line_str in text.lines() {
+                        if lines.len() >= MAX_RENDER_LINES {
+                            break;
+                        }
                         lines.push(self.render_content_line(line_str, &theme));
                     }
                 }

@@ -15,6 +15,8 @@ pub static CWD_LOCK: Mutex<()> = Mutex::const_new(());
 use self::syntax::{CommandResult, CommandType, NCommand};
 use tracing::info;
 
+use std::path::PathBuf;
+
 pub struct CommandWatcher {
     buffer: String,
     parser: parser::CommandParser,
@@ -170,14 +172,19 @@ fn cmd_label(cmd: &NCommand) -> String {
 }
 
 pub async fn execute_commands(commands: Vec<NCommand>) -> Vec<CommandResult> {
+    execute_commands_with_backup(commands, None).await
+}
+
+pub async fn execute_commands_with_backup(commands: Vec<NCommand>, backup_dir: Option<PathBuf>) -> Vec<CommandResult> {
     let mut tasks = Vec::new();
     for cmd in commands {
         info!("Executing command: {}", cmd_label(&cmd));
+        let bd = backup_dir.clone();
         let handle: tokio::task::JoinHandle<Result<Vec<CommandResult>, anyhow::Error>> =
             tokio::spawn(async move {
                 match cmd {
                     NCommand::Shell { blocks } => shell::execute(blocks).await,
-                    NCommand::FilesOperator { blocks } => files_operator::execute(blocks).await,
+                    NCommand::FilesOperator { blocks } => files_operator::execute_with_backup(blocks, bd.as_deref()).await,
                     NCommand::ToolCall { blocks } => tool_call::execute(blocks).await,
                     NCommand::SubAgentTask { blocks } => sub_agent_task::execute(blocks).await,
                     NCommand::AgentSkills { blocks } => agent_skills::execute(blocks).await,
@@ -205,7 +212,9 @@ pub fn format_command_results(results: &[CommandResult]) -> String {
         return String::new();
     }
 
-    let mut out = String::from("【|SYSTEM|】\n");
+    let mut out = String::from(
+        "(你调用的命令执行结果如下)\n【|Command/Tool|】\n",
+    );
 
     for r in results {
         match r.command_type {
@@ -235,7 +244,7 @@ pub fn format_command_results(results: &[CommandResult]) -> String {
         }
     }
 
-    out.push_str("【|SYSTEM|】");
+    out.push_str("【|Command/Tool|】");
     out
 }
 
@@ -404,10 +413,10 @@ mod tests {
         }];
 
         let formatted = format_command_results(&results);
-        assert!(formatted.starts_with("【|SYSTEM|】"));
-        assert!(formatted.contains("[ShellResult]"));
+        assert!(formatted.starts_with("(你调用的命令执行结果如下)"));
+        assert!(formatted.contains("【|Command/Tool|】"));
         assert!(formatted.contains("hello"));
-        assert!(formatted.ends_with("【|SYSTEM|】"));
+        assert!(formatted.ends_with("【|Command/Tool|】"));
     }
 
     #[test]
@@ -498,7 +507,7 @@ mod tests {
         assert!(!results.is_empty());
 
         let injection = format_command_results(&results);
-        assert!(injection.contains("【|SYSTEM|】"));
+        assert!(injection.contains("【|Command/Tool|】"));
         assert!(injection.contains("[ShellResult]"));
         assert!(injection.contains("verify-pipeline"));
     }

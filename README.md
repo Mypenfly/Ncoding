@@ -49,7 +49,7 @@ DEEPSEEK_API_KEY=sk-xxx cargo run
 ### 不使用 Nix
 
 ```bash
-# 需要：Rust stable + openssl + ncurses + nushell + ripgrep + jujutsu
+# 需要：Rust stable + bash + ripgrep (rg) + jujutsu (jj)
 git clone https://github.com/your-org/n-coding.git
 cd n-coding
 cargo build --release
@@ -73,7 +73,7 @@ DEEPSEEK_API_KEY=sk-xxx ./target/release/n-coding
 
 | 命令 | 用途 |
 |------|------|
-| **Shell** | 执行 nushell 命令（同步/异步），安全审查，输出截断 |
+| **Shell** | 执行 bash 命令（同步/异步），安全审查，输出截断 |
 | **FilesOperator** | 文件的 Read（行号+offset/limit）、Write、Edit（精确字符串替换） |
 | **ToolCall** | 调用 KDL 配置中定义的外部工具，CLI-arg JSON 传参 |
 | **SubAgentTask** | 委派子任务到独立上下文 agent |
@@ -118,12 +118,15 @@ cargo fmt -- --check           # 格式检查
 
 ## 开发阶段
 
-| 阶段 | 状态 |
-|------|------|
-| Phase 1: MVP — TUI 对话 + Shell 同步执行 | ✅ 完成 |
-| Phase 2: 命令体系 — 7 种内置命令 | ✅ 完成 |
-| Phase 3: Session + 日志 + 状态 | ✅ 完成 |
-| Phase 4: 打磨 — model 面板、markdown 渲染、resize 自适应等 | 🚧 进行中 |
+| 阶段 | 状态 | 完成率 |
+|------|------|--------|
+| Phase 1: MVP — TUI 对话 + Shell 同步执行 | ✅ 完成 | 100% (9/9) |
+| Phase 2: 命令体系 — 7 种内置命令 | ✅ 完成 | 100% (7/7) |
+| Phase 3: Session + Shell 进阶 | ✅ 基本完成 | 80% (8/10) |
+| Phase 4: 打磨 — model 面板、折叠、resize、markdown 渲染 | 🚧 进行中 | 30% (2/7) |
+
+**当前状态**: 150 测试全部通过。核心命令系统、session 管理、API 集成均已完成。
+Phase 4 优先项: 终端 resize 自适应 → /model 面板 → Markdown 渲染完善 → 命令块折叠。
 
 详见 [`phases.md`](phases.md)。
 

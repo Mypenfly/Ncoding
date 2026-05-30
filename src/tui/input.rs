@@ -108,7 +108,7 @@ impl InputState {
                 continue;
             }
             let c_width = unicode_width::UnicodeWidthChar::width(c).unwrap_or(1);
-            if line_pos + c_width > max_width && line_pos > 0 {
+            if line_pos + c_width > max_width {
                 row += 1;
                 line_pos = 0;
             }

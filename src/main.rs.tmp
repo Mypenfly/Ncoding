@@ -1,1 +1,0 @@
-pub mod test_diag; use test_diag as _;

@@ -58,6 +58,8 @@ pub struct SessionConfig {
     pub backups_dir: String,
     #[serde(default = "default_max_ctx_messages")]
     pub max_context_messages: usize,
+    #[serde(default = "default_max_undos")]
+    pub max_undos: usize,
     #[serde(default)]
     pub verbose: bool,
 }
@@ -126,6 +128,9 @@ fn default_backups_dir() -> String {
 fn default_max_ctx_messages() -> usize {
     50
 }
+fn default_max_undos() -> usize {
+    5
+}
 fn default_skills_local_dir() -> String {
     ".ncoding/skills".into()
 }
@@ -157,6 +162,7 @@ impl Default for AppConfig {
                 sessions_dir: default_sessions_dir(),
                 backups_dir: default_backups_dir(),
                 max_context_messages: default_max_ctx_messages(),
+                max_undos: default_max_undos(),
                 verbose: false,
             },
             skills: SkillsConfig {
@@ -211,6 +217,7 @@ impl Default for SessionConfig {
             sessions_dir: default_sessions_dir(),
             backups_dir: default_backups_dir(),
             max_context_messages: default_max_ctx_messages(),
+            max_undos: default_max_undos(),
             verbose: false,
         }
     }
@@ -461,6 +468,7 @@ fn apply_config_value(config: &mut AppConfig, section: &str, key: &str, value: &
             "max_context_messages" => {
                 config.session.max_context_messages = value.parse().unwrap_or(50)
             }
+            "max_undos" => config.session.max_undos = value.parse().unwrap_or(5),
             "verbose" => config.session.verbose = value == "true",
             _ => {}
         },

@@ -232,7 +232,7 @@ impl CommandParser {
             "FILESOPERATOR" => {
                 let blocks: Vec<FileOpBlock> = kvs.into_iter().map(|m| {
                     let mode = match m.get("mode").map(|v| v.as_str()) { Some("read") => FileMode::Read, Some("edit") => FileMode::Edit, _ => FileMode::Write };
-                    FileOpBlock { mode, path: std::path::PathBuf::from(m.get("path").cloned().unwrap_or_default()), content: m.get("content").cloned(), old_str: m.get("old_str").cloned(), new_str: m.get("new_str").cloned(), offset: m.get("offset").and_then(|v| v.parse().ok()), limit: m.get("limit").and_then(|v| v.parse().ok()) }
+                    FileOpBlock { mode, path: std::path::PathBuf::from(m.get("path").cloned().unwrap_or_default()), content: m.get("content").cloned(), old_str: m.get("old_str").cloned(), new_str: m.get("new_str").cloned(), old_lines: m.get("old_lines").cloned(), new_lines: m.get("new_lines").cloned(), offset: m.get("offset").and_then(|v| v.parse().ok()), limit: m.get("limit").and_then(|v| v.parse().ok()) }
                 }).collect();
                 if !blocks.is_empty() { Some(NCommand::FilesOperator { blocks }) } else { None }
             }

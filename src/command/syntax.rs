@@ -24,6 +24,8 @@ pub struct FileOpBlock {
     pub content: Option<String>,
     pub old_str: Option<String>,
     pub new_str: Option<String>,
+    pub old_lines: Option<String>,
+    pub new_lines: Option<String>,
     pub offset: Option<usize>,
     pub limit: Option<usize>,
 }
