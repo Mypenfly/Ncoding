@@ -2,10 +2,11 @@
 
 ## Environment
 
-- **Nix dev shell**: `nix develop` (or `direnv allow`). The shell hook **drops you into nushell** (`nu`), not bash.
-- **Without Nix**: you need Rust stable + openssl + ncurses + `nushell`, `ripgrep`, `jujutsu` on PATH.
+- **Nix dev shell**: `nix develop` (or `direnv allow`).
+- **Without Nix**: you need Rust stable + openssl + ncurses + `bash`, `ripgrep`, `jujutsu` on PATH.
 - **API key**: `DEEPSEEK_API_KEY` env var required at runtime.
-- **CI shell** (non-interactive): `nix develop .#ci` — skips the nushell entry and dev tools.
+- **CI shell** (non-interactive): `nix develop .#ci`.
+- **Logging**: `RUST_LOG` env controls level (default `info`). Logs go to `.ncoding/n-coding.log` via `tracing`.
 
 ## Build / Test / Lint
 
@@ -16,41 +17,70 @@ cargo clippy -- -D warnings
 cargo fmt -- --check
 ```
 
-- `RUSTFLAGS="-C target-cpu=native"` is set in the Nix shell. Keep it for local builds.
 - `RUST_BACKTRACE=1` is set in the Nix shell.
 
 ## Architecture
 
-This is a **TUI coding agent** (ratatui + crossterm). It is NOT a library — `src/main.rs` is the single entrypoint.
+This is a **TUI coding agent** (ratatui + crossterm). Single entrypoint: `src/main.rs`.
 
-### Module ownership (see `src/*/README.md` for full context)
+### Module ownership
 
 | Module | Job |
 |--------|-----|
-| `command/` | Text-command parser + 5 built-in executors (Shell, FilesOperator, ToolCall, SubAgentTask, AgentSkills) |
-| `session/` | `.ncoding/sessions/*.json` persistence, `/undo` file backups |
-| `api/` | DeepSeek SSE streaming + reasoning_content handling |
+| `command/` | Text-command parser + 7 executors (Shell, FilesOperator, ToolCall, SubAgentTask, AgentSkills, CheckList, AgentLogs) |
+| `session/` | `.ncoding/sessions/*.json` persistence, lazy activation, `/undo` |
+| `api/` | DeepSeek SSE streaming + reasoning_content handling, session name generation |
 | `config/` | KDL config loader (3-tier: env → `n_coding.kdl` → `~/.config/ncoding/config.kdl`) |
-| `tui/` | ratatui app loop, rendering, input, `/model` panel, Everforest theme |
+| `tui/` | ratatui app loop, rendering, input, Everforest theme |
 | `prompt/` | System prompt template assembly |
 
 ### Key design decisions (not obvious from filenames)
 
-1. **No OpenAI tool_call / function_call.** Commands are parsed from model text output via regex (`<<<[Command]>>>...<<<[__END__]>>>`). Adding a native tool_call would violate the design.
-2. **Shell commands use nushell (`/usr/bin/nu -c`), NEVER bash.** The shell executor hardcodes `nu`.
-3. **reasoning_content must be round-tripped.** DeepSeek does not auto-include it; `api::client` stores it and sends it back in the next request's assistant message.
-4. **FilesOperator edit uses exact-string-replace** (like OpenCode/Claude Code). Old string must be unique in the file; model must `read` before `edit`.
-5. **Config is KDL format**, parsed via `knus` crate. Not TOML, not JSON.
-6. **Session naming is auto-generated** via a separate lightweight API call (using `sub_model`, default `deepseek-v4-flash`).
+1. **No OpenAI tool_call/function_call.** Commands parsed from `《[Command]|character|》` ... `《[End]|Command|》` with `【key】value【key】` pairs.
+2. **Shell uses bash (`/usr/bin/bash -c`), NOT nushell.** Changed from nu to improve model familiarity. Recommend rg (ripgrep) for file search.
+3. **reasoning_content must be round-tripped.** DeepSeek does not auto-include it.
+4. **FilesOperator edit uses exact-string-replace.** Model must `read` before `edit`.
+5. **Config is KDL format**, parsed via `kdl` crate. Not TOML/JSON.
+6. **`---` in KV content is NOT a block separator.** Prevent markdown horizontal rules from mis-parsing.
+7. **Non-blocking command execution.** results arrive via `TuiEvent::CommandsCompleted`.
+8. **Auto-continue is unlimited.** No cap on consecutive model-driven turns.
+9. **System injection format: `【|SYSTEM|】\n...\n【|SYSTEM|】`** — replaces old `<(<(SYSTEM...)>)>`.
+10. **No automatic context truncation** — `max_context_messages` removed to preserve cache hit rate. Only `/clear` truncates (user-initiated).
+11. **Session lazy creation** — file created only on first real user input, not at startup.
+12. **Slash commands**: `/init`, `/compact`, `/clear` (display only), `/session list|switch <name or id>|rename|delete`, `/undo`.
 
-## Development phases
+## Development conventions
 
-See `phases.md` at root — it maps each `src/` directory to the 4 phases. Currently the project is a **skeleton** (Phase 1 work starting).
+- **No comments in Rust source** unless absolutely essential (project style).
+- **README.md in each `src/` subdirectory** is the design doc — keep them in sync.
+- **Error handling**: `anyhow::Result` for application-level, `std::io::Error` for terminal I/O.
+- **`#![allow(dead_code)]`** on several modules (input.rs, render.rs, model_panel.rs, backup.rs) — these are Phase 4 placeholders.
+- **TUI testing**: the app runs in an alternate screen — manual testing only. Use `tracing` for debug logging.
+- **Everforest dark** is the only theme. Colors in `src/tui/theme.rs`.
 
-## Conventions
+## Common shell commands (this workspace)
 
-- **No comments** in Rust source unless essential (following the project's minimal-comment style already in place).
-- **README.md files** in each `src/` subdirectory are the design-level docs — keep them in sync with significant architecture changes.
-- **Everforest dark theme** is the only theme. Color constants live in `src/tui/theme.rs`.
-- **Error handling**: use `anyhow::Result` for application-level, `std::io::Error` for terminal I/O.
-- **TUI testing**: the app runs in an alternate screen — manual testing only. Print-debug with `tracing` (logs to stderr or `.ncoding/n-coding.log`).
+```sh
+# Finding files (use rg, NOT find)
+rg "pattern" src/**/*.rs
+rg -l "struct Foo" src/
+
+# Directory listing
+ls src/**/*.rs | sort
+
+# Running tests
+cargo test                              # all tests
+cargo test parser                       # single module
+cargo test -- --nocapture               # with output
+
+# Checking just compilation (fast)
+cargo check
+
+# Fixing auto-fixable warnings
+cargo fix --bin "n-coding" --allow-dirty
+```
+
+## Phase status
+
+Phase 1-3: ✅ Complete
+Phase 4: 🚧 In progress (model panel, markdown, resize, shell env injection)

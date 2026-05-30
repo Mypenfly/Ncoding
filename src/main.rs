@@ -29,6 +29,12 @@ fn init_logging() -> anyhow::Result<()> {
 async fn main() -> anyhow::Result<()> {
     init_logging()?;
 
+    if let Err(e) = fs::remove_file(".ncoding/checklist.json") {
+        if e.kind() != std::io::ErrorKind::NotFound {
+            tracing::warn!("Failed to remove old checklist.json: {}", e);
+        }
+    }
+
     info!("N-coding starting...");
 
     let cfg = config::loader::load()?;

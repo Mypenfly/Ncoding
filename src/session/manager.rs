@@ -36,8 +36,9 @@ pub enum Role {
 
 pub struct SessionManager {
     sessions_dir: PathBuf,
-    backups_dir: PathBuf,
+ backups_dir: PathBuf,
     current_session: Option<Session>,
+    is_activated: bool,
 }
 
 impl SessionManager {
@@ -46,6 +47,7 @@ impl SessionManager {
             sessions_dir,
             backups_dir,
             current_session: None,
+            is_activated: false,
         }
     }
 
@@ -129,6 +131,10 @@ impl SessionManager {
         Ok(())
     }
 
+    pub fn rename_current(&mut self, new_name: &str) -> std::io::Result<()> {
+        self.rename_session(new_name)
+    }
+
     pub fn delete_session(&self, name: &str) -> std::io::Result<()> {
         let path = self.sessions_dir.join(format!("{}.json", name));
         if path.exists() {
@@ -151,12 +157,26 @@ impl SessionManager {
     }
 
     pub fn add_message(&mut self, message: Message) -> std::io::Result<()> {
+        if self.current_session.is_some() {
+            if message.role == Role::Info && !self.is_activated {
+                self.add_message_lazy(message);
+                return Ok(());
+            }
+            self.activate()?;
+            if let Some(ref mut session) = self.current_session {
+                session.messages.push(message);
+                session.updated_at = Utc::now();
+                self.save_current()?;
+            }
+        }
+        Ok(())
+    }
+
+    pub fn add_message_lazy(&mut self, message: Message) {
         if let Some(ref mut session) = self.current_session {
             session.messages.push(message);
             session.updated_at = Utc::now();
-            self.save_current()?;
         }
-        Ok(())
     }
 
     pub fn remove_last_turn(&mut self) -> Option<(Message, Message)> {
@@ -217,6 +237,61 @@ impl SessionManager {
             .as_ref()
             .map(|s| s.messages.clone())
             .unwrap_or_default()
+    }
+
+    pub fn is_activated(&self) -> bool {
+        self.is_activated
+    }
+
+    pub fn prepare_session(&mut self, name: &str) {
+        let session = Session {
+            name: name.to_string(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            messages: Vec::new(),
+        };
+        self.current_session = Some(session);
+        self.is_activated = false;
+    }
+
+    pub fn activate(&mut self) -> std::io::Result<()> {
+        if !self.is_activated {
+            self.is_activated = true;
+            self.save_current()?;
+        }
+        Ok(())
+    }
+
+    pub fn rename_session_file(&mut self, new_name: &str) -> std::io::Result<()> {
+        if let Some(ref session) = self.current_session {
+            let old_path = self.sessions_dir.join(format!("{}.json", session.name));
+            let new_path = self.sessions_dir.join(format!("{}.json", new_name));
+            if old_path.exists() && old_path != new_path {
+                fs::rename(&old_path, &new_path)?;
+            }
+            let mut new_session = session.clone();
+            new_session.name = new_name.to_string();
+            new_session.updated_at = Utc::now();
+            self.current_session = Some(new_session);
+            if self.is_activated {
+                self.save_current()?;
+            }
+        }
+        Ok(())
+    }
+
+    pub fn load_session_by_index(&mut self, index: usize) -> std::io::Result<()> {
+        let sessions = self.list_sessions()?;
+        if index >= sessions.len() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("session index {} not found (total: {})", index, sessions.len()),
+            ));
+        }
+        let name = &sessions[index].0;
+        self.load_session(name)?;
+        self.is_activated = true;
+        Ok(())
     }
 }
 
@@ -373,5 +448,133 @@ mod tests {
             make_msg(Role::User, "u"),
         ]);
         assert_eq!(mgr.messages().len(), 2);
+    }
+
+    #[test]
+    fn test_prepare_session_is_not_activated() {
+        let mut mgr = make_test_manager();
+        mgr.init_dirs().unwrap();
+        mgr.prepare_session("lazy");
+        assert_eq!(mgr.current_name(), Some("lazy"));
+        assert!(!mgr.is_activated());
+        let path = mgr.sessions_dir.join("lazy.json");
+        assert!(!path.exists());
+    }
+
+    #[test]
+ fn test_activate_creates_file_and_saves() {
+        let mut mgr = make_test_manager();
+        mgr.init_dirs().unwrap();
+        mgr.prepare_session("lazy");
+        let path = mgr.sessions_dir.join("lazy.json");
+        assert!(!path.exists());
+        mgr.activate().unwrap();
+        assert!(mgr.is_activated());
+        assert!(path.exists());
+    }
+
+    #[test]
+    fn test_add_message_auto_activates() {
+        let mut mgr = make_test_manager();
+        mgr.init_dirs().unwrap();
+        mgr.prepare_session("lazy");
+        assert!(!mgr.is_activated());
+        mgr.add_message(make_msg(Role::User, "hello")).unwrap();
+        let path = mgr.sessions_dir.join("lazy.json");
+        assert!(path.exists());
+    }
+
+    #[test]
+    fn test_load_session_by_index() {
+        let mut mgr = make_test_manager();
+        mgr.init_dirs().unwrap();
+        mgr.new_session("alpha").unwrap();
+        mgr.add_message(make_msg(Role::System, "s")).unwrap();
+        mgr.new_session("beta").unwrap();
+        mgr.add_message(make_msg(Role::User, "hello")).unwrap();
+
+        let mut mgr2 = make_test_manager();
+        mgr2.sessions_dir = mgr.sessions_dir.clone();
+        mgr2.load_session_by_index(0).unwrap();
+        assert_eq!(mgr2.current_name(), Some("beta"));
+        let msgs = mgr2.messages();
+        assert_eq!(msgs.len(), 1);
+               assert_eq!(msgs[0].content.as_deref(), Some("hello"));
+    }
+
+    #[test]
+    fn test_load_session_by_invalid_index() {
+        let mut mgr = make_test_manager();
+        mgr.init_dirs().unwrap();
+        let result = mgr.load_session_by_index(0);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_rename_session_file() {
+        let mut mgr = make_test_manager();
+        mgr.init_dirs().unwrap();
+        mgr.new_session("old-name").unwrap();
+        mgr.activate().unwrap();
+        mgr.rename_session_file("new-name").unwrap();
+        assert_eq!(mgr.current_name(), Some("new-name"));
+        assert!(!mgr.sessions_dir.join("old-name.json").exists());
+        assert!(mgr.sessions_dir.join("new-name.json").exists());
+    }
+
+    #[test]
+    fn test_rename_session_file_before_activation() {
+        let mut mgr = make_test_manager();
+        mgr.init_dirs().unwrap();
+        mgr.prepare_session("pre-activate");
+        mgr.rename_session_file("renamed-pre-activate").unwrap();
+        assert_eq!(mgr.current_name(), Some("renamed-pre-activate"));
+        assert!(!mgr.is_activated());
+        assert!(!mgr.sessions_dir.join("renamed-pre-activate.json").exists());
+    }
+
+    #[test]
+    fn test_prepare_then_add_message_activates_and_saves() {
+        let mut mgr = make_test_manager();
+        mgr.init_dirs().unwrap();
+        mgr.prepare_session("lazy");
+        mgr.add_message(make_msg(Role::System, "system")).unwrap();
+        mgr.add_message(make_msg(Role::User, "hello")).unwrap();
+        let path = mgr.sessions_dir.join("lazy.json");
+        assert!(path.exists());
+        let json = std::fs::read_to_string(&path).unwrap();
+        let session: Session = serde_json::from_str(&json).unwrap();
+        assert_eq!(session.messages.len(), 2);
+    }
+
+    #[test]
+    fn test_add_message_lazy_does_not_create_file() {
+        let mut mgr = make_test_manager();
+        mgr.init_dirs().unwrap();
+        mgr.prepare_session("lazy");
+        mgr.add_message_lazy(make_msg(Role::System, "system prompt"));
+        mgr.add_message_lazy(make_msg(Role::User, "hello"));
+        assert!(!mgr.is_activated());
+        let path = mgr.sessions_dir.join("lazy.json");
+        assert!(!path.exists(), "file should not exist until activated");
+        assert_eq!(mgr.messages().len(), 2, "messages should be in memory");
+        mgr.activate().unwrap();
+        assert!(path.exists(), "file should exist after activate");
+    }
+
+    #[test]
+    fn test_info_message_does_not_activate_session() {
+        let mut mgr = make_test_manager();
+        mgr.init_dirs().unwrap();
+        mgr.prepare_session("lazy");
+        mgr.add_message_lazy(make_msg(Role::System, "system"));
+        mgr.add_message(make_msg(Role::Info, "help text")).unwrap();
+        assert!(!mgr.is_activated(), "info message should not activate session");
+        let path = mgr.sessions_dir.join("lazy.json");
+        assert!(!path.exists(), "no file for info-only sessions");
+        assert_eq!(mgr.messages().len(), 2, "info messages are still in memory");
+        mgr.add_message(make_msg(Role::User, "hello")).unwrap();
+        assert!(mgr.is_activated(), "real user message should activate");
+        assert!(path.exists(), "file should exist after real message");
     }
 }

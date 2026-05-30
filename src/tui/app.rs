@@ -42,7 +42,6 @@ pub struct App {
     api_client: DeepSeekClient,
     cmd_watcher: CommandWatcher,
     session_mgr: SessionManager,
-    max_ctx: usize,
     auto_continue_count: u32,
     state: AppState,
     input: String,
@@ -56,6 +55,7 @@ pub struct App {
     status_text: String,
     tui_tx: mpsc::UnboundedSender<TuiEvent>,
     tui_rx: mpsc::UnboundedReceiver<TuiEvent>,
+    name_generated: bool,
 }
 
 pub fn init_terminal() -> io::Result<TuiTerminal> {
@@ -93,17 +93,14 @@ impl App {
         );
         let _ = session_mgr.init_dirs();
         let session_name = format!("session-{}", chrono::Utc::now().format("%Y%m%d-%H%M%S"));
-        let _ = session_mgr.new_session(&session_name);
+        session_mgr.prepare_session(&session_name);
         let system_prompt = prompt_builder.build();
-        session_mgr
-            .add_message(Message {
-                role: Role::System,
-                content: Some(system_prompt),
-                reasoning_content: None,
-            })
-            .ok();
+        session_mgr.add_message_lazy(Message {
+            role: Role::System,
+            content: Some(system_prompt),
+            reasoning_content: None,
+        });
 
-        let max_ctx = config.session.max_context_messages;
         let status_text = format!(
             "{} · {} · {} · thinking",
             workspace,
@@ -115,7 +112,6 @@ impl App {
             api_client,
             cmd_watcher: CommandWatcher::new(),
             session_mgr,
-            max_ctx,
             auto_continue_count: 0,
             state: AppState::Stop,
             input: String::new(),
@@ -130,6 +126,7 @@ impl App {
             tui_tx,
             tui_rx,
             config,
+            name_generated: false,
         }
     }
 
@@ -207,7 +204,6 @@ impl App {
 
     fn push_msg(&mut self, msg: Message) {
         self.session_mgr.add_message(msg).ok();
-        self.session_mgr.truncate_context(self.max_ctx);
     }
 
     fn slash_reply(&mut self, text: String) {
@@ -252,7 +248,7 @@ impl App {
         let trimmed = input_text.trim();
         if trimmed.starts_with("<<<[") {
             let mut parser = CommandParser::new();
-            let (cmds, final_pos) = parser.extract_commands_from_final(trimmed, 0);
+            let (cmds, final_pos, _warnings) = parser.extract_commands_from_final(trimmed, 0);
             if !cmds.is_empty() && trimmed[final_pos..].trim().is_empty() {
                 let results = execute_commands(cmds).await;
                 let injection = format_command_results(&results);
@@ -275,6 +271,22 @@ impl App {
 
         self.auto_continue_count = 0;
         self.auto_scroll = true;
+
+        // Trigger async session name generation on first user message
+        if !self.name_generated {
+            self.name_generated = true;
+            self.session_mgr.activate().ok();
+            let client = self.api_client.clone();
+            let tx = self.tui_tx.clone();
+            let user_text = input_text.clone();
+
+            tokio::spawn(async move {
+                if let Ok(name) = client.generate_session_name(&user_text).await {
+                    let _ = tx.send(TuiEvent::SessionRenamed(name));
+                }
+            });
+        }
+
         self.continue_conversation();
     }
 
@@ -307,6 +319,13 @@ impl App {
                 self.state = AppState::Stop;
                 self.slash_reply(format!("[Error] {}", err));
             }
+            TuiEvent::SessionRenamed(name) => {
+                if let Err(e) = self.session_mgr.rename_current(&name) {
+                    info!("Session rename failed: {}", e);
+                } else {
+                    self.update_status();
+                }
+            }
             TuiEvent::CommandsCompleted { results } => {
                 self.handle_commands_completed(results).await;
             }
@@ -333,13 +352,13 @@ impl App {
             });
         }
 
-        let remaining = self.cmd_watcher.finalize();
+        let (cmds, _errors) = self.cmd_watcher.finalize();
         let mut cmd_watcher = std::mem::take(&mut self.cmd_watcher);
         let tx = self.tui_tx.clone();
         tokio::spawn(async move {
             let mut results: Vec<CommandResult> = Vec::new();
-            if !remaining.is_empty() {
-                results.append(&mut execute_commands(remaining).await);
+            if !cmds.is_empty() {
+                results.append(&mut execute_commands(cmds).await);
             }
             results.append(&mut cmd_watcher.drain_results().await);
             let _ = tx.send(TuiEvent::CommandsCompleted { results });
@@ -434,7 +453,7 @@ impl App {
                 /cancel - cancel current stream (Esc)\n\
                 /clear - clear display\n\
                 /session list - list all sessions\n\
-                /session switch <name> - switch session\n\
+                /session switch <name or id> - switch session\n\
                 /session rename <name> - rename current\n\
                 /session delete <name> - delete session\n\
                 /session current - show current\n\
@@ -503,7 +522,7 @@ impl App {
                         });
                     } else {
                         let mut out = String::from("Sessions:\n");
-                        for (name, updated) in &sessions {
+                        for (i, (name, updated)) in sessions.iter().enumerate() {
                             let current_mark =
                                 if Some(name.as_str()) == self.session_mgr.current_name() {
                                     " *"
@@ -511,7 +530,8 @@ impl App {
                                     ""
                                 };
                             out.push_str(&format!(
-                                "  {} ({}){}\n",
+                                "  [{}] {} ({}){}\n",
+                                i,
                                 name,
                                 updated.format("%Y-%m-%d %H:%M"),
                                 current_mark
@@ -537,20 +557,30 @@ impl App {
                 if name.is_empty() {
                     self.push_msg(Message {
                         role: Role::Info,
-                        content: Some("Usage: /session switch <name>".into()),
+                        content: Some("Usage: /session switch <name or id>".into()),
                         reasoning_content: None,
                     });
                     return;
                 }
-                match self.session_mgr.load_session(name) {
+                // 支持数字索引切换
+                let result = if let Ok(index) = name.parse::<usize>() {
+                    self.session_mgr.load_session_by_index(index)
+                } else {
+                    self.session_mgr.load_session(name)
+                };
+                match result {
                     Ok(()) => {
                         self.update_status();
                         let msgs = self.msgs();
+                        let display_name = self
+                            .session_mgr
+                            .current_name()
+                            .unwrap_or(name);
                         self.push_msg(Message {
                             role: Role::Info,
                             content: Some(format!(
                                 "Switched to session '{}' ({} messages)",
-                                name,
+                                display_name,
                                 msgs.len()
                             )),
                             reasoning_content: None,
@@ -730,7 +760,7 @@ impl App {
                 }
                 Role::User => {
                     let text = msg.content.as_deref().unwrap_or("");
-                    if text.starts_with("<(<(SYSTEM") {
+                    if text.starts_with("【|SYSTEM|】") {
                         for line_str in text.lines() {
                             lines.push(Line::from(Span::styled(
                                 line_str,

@@ -18,7 +18,7 @@
 | | `theme.rs` | Everforest 暗色主题色彩常量 |
 | `src/command/` | `parser.rs` | `<<<[Command]>>>` 正则解析器，5→7 种命令类型，`---` 分隔、`__END__` 截止、命令名标准化 |
 | | `syntax.rs` | 数据结构：NCommand, ShellBlock, FileOpBlock, ToolCallBlock, SubAgentBlock, SkillsBlock, CheckListBlock, AgentLogsBlock, CommandResult |
-| | `shell.rs` | nu 同步/异步执行 (tokio::process)，安全审查，输出截断(>100行) |
+| | `shell.rs` | bash 同步/异步执行 (tokio::process)，安全审查，输出截断(>100行) |
 | | `files_operator.rs` | Read(行号+offset/limit)、Write、Edit(精确替换+唯一性检查) |
 | | `mod.rs` | CommandWatcher（流式监听+中流提取+非阻塞收集），命令调度，结果格式化 |
 | `src/prompt/` | `builder.rs` | 系统提示词：character + grammar + 7 种命令文档 + 外部工具 |
@@ -33,7 +33,7 @@ API SSE stream → TUI 流式显示 + CommandWatcher 中流监听
   ↓
 StreamDone → save assistant msg → tokio::spawn(drain_results) → 非阻塞
   ↓
-CommandsCompleted → format results → inject user msg → auto continue (≤20次)
+CommandsCompleted → format results → inject user msg → auto continue（无限次，无上限）
   ↓
 无命令且无未完成 CheckList → AppState::Stop
 ```
@@ -75,7 +75,7 @@ tokio::spawn(execute_commands) → 异步执行
   ↓
 drain_results (background task) → 收集 CommandResult
   ↓
-format_command_results → <(<(SYSTEM...[Result])>)>
+format_command_results → 【|SYSTEM|】...[Result]...【|SYSTEM|】
 ```
 
 ---
@@ -90,7 +90,7 @@ format_command_results → <(<(SYSTEM...[Result])>)>
 | 3.4 | `/undo` 撤回机制（轮次级） | ✅ |
 | 3.5 | `/clear`、`/help`、`/quit` 指令 | ✅ |
 | 3.6 | Token 信息栏（usage 解析 + cache hit 比例） | ✅ |
-| 3.7 | 上下文截断（max_context_messages） | ✅ |
+| 3.7 | 上下文截断（max_context_messages）→ 已移除，避免影响模型 cache 命中率 | ⬜ |
 | 3.8 | 日志系统 — info 级别，API 请求/命令解析/命令执行记录 | ✅ |
 | 3.9 | 状态显示 — STOP(绿) / WORKING(红) 在标题栏右侧 | ✅ |
 | 3.10 | 输入 guard — 命令执行中阻止新用户输入 | ✅ |
@@ -105,8 +105,13 @@ format_command_results → <(<(SYSTEM...[Result])>)>
 | 4.2 | Markdown 渲染完善（表格、链接、图片） | ⬜ |
 | 4.3 | 命令块/结果 折叠展开 UI | ⬜ |
 | 4.4 | 终端 resize 自适应 | ⬜ |
-| 4.5 | Shell 环境信息注入（ShellEnvInfo + build_env_injection） | ⬜ |
-| 4.11 | 命令调用的双向性增强（用户消息中识别命令） | ⬜ |
+| 4.5 | Shell → bash 切换，非思考模式生成 session 标题 | ✅ |
+| 4.6 | 系统注入格式切换 `【|SYSTEM|】...【|SYSTEM|】` | ✅ |
+| 4.7 | 命令结果输出优化（Shell/File/CheckList 增加 status 字段） | ✅ |
+| 4.8 | 删除自动上下文截断（避免破坏 cache 命中率） | ✅ |
+| 4.9 | character_prompt 增强（告知模型与 N-coding 系统交互方式） | ✅ |
+| 4.10 | Session 懒加载（首次用户输入才创建文件） | ✅ |
+| 4.11 | `/session switch` 支持数字索引（id）| ✅ |
 | 4.12 | `$` 命令行方式启动方案 | ⬜ |
 
 ---
@@ -145,7 +150,7 @@ Phase 1 (MVP) ✅
 
 | 命令 | 参数 | 用途 | 文件 |
 |------|------|------|------|
-| Shell | command, is_async | nushell 命令执行 | `shell.rs` |
+| Shell | command, is_async | bash 命令执行 | `shell.rs` |
 | FilesOperator | mode(read/write/edit), path, content, old_str, new_str, offset, limit | 文件读写编辑 | `files_operator.rs` |
 | ToolCall | tool_name, args... | 外部工具调用(CLI-arg JSON) | `tool_call.rs` |
 | SubAgentTask | prompt | 子 agent 任务委派 | `sub_agent_task.rs` |
@@ -164,4 +169,4 @@ Phase 1 (MVP) ✅
 | `src/tui/render.rs` | MarkdownRenderer 未使用，Phase 4 中完善 |
 | `src/session/backup.rs` | BackupManager 未使用，Phase 3 `/undo` 内联实现 |
 | `src/api/client.rs` | `list_models`、`generate_session_name` 通过 `#[allow(dead_code)]` 保留 |
-| `src/prompt/builder.rs` | `build_env_injection`、`ShellEnvInfo` 预留给 Phase 4.5 |
+| `src/prompt/builder.rs` | `build_env_injection`、`ShellEnvInfo` 已用于 Phase 4 shell 环境注入 |

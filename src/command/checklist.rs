@@ -71,7 +71,7 @@ pub fn unfinished_summary() -> Option<String> {
     }
     let mut summary = String::from("[CheckList] 未完成任务:\n");
     for t in pending {
-        summary.push_str(&format!("  [{}] {} — {}\n", t.status, t.id, t.title));
+    summary.push_str(&format!("  [{}] {} - {}\n", t.status, t.id, t.title));
     }
     Some(summary)
 }
@@ -80,14 +80,14 @@ fn cmd_list() -> CommandOutcome {
     let store = load_store();
     if store.tasks.is_empty() {
         return CommandOutcome::Success {
-            summary: "CheckList is empty.".into(),
+            summary: "status: OK\ntasks: (empty)".into(),
         };
     }
-    let mut out = String::from("CheckList:\n");
+    let mut out = String::from("status: OK\ntasks:\n");
     for t in &store.tasks {
         out.push_str(&format!(
-            "  [{}] {} — {} ({})\n",
-            t.status, t.id, t.title, t.updated_at
+            "  [{}] {} — {}\n",
+            t.status, t.id, t.title
         ));
     }
     CommandOutcome::Success { summary: out }
@@ -108,12 +108,13 @@ fn cmd_create(title: Option<String>, content: Option<String>) -> CommandOutcome 
         updated_at: now,
     };
 
+    let task_id = task.id.clone();
     let mut store = load_store();
     store.tasks.push(task);
 
     match save_store(&store) {
         Ok(()) => CommandOutcome::Success {
-            summary: format!("CheckList: created task '{}'", title),
+            summary: format!("status: OK\ntask: created '{}' (id: {})", title, task_id),
         },
         Err(e) => CommandOutcome::Failure {
             error: format!("Failed to save checklist: {}", e),
@@ -157,7 +158,7 @@ fn cmd_update(id: Option<String>, status: Option<String>) -> CommandOutcome {
         let new_status = task.status.clone();
         match save_store(&store) {
             Ok(()) => CommandOutcome::Success {
-                summary: format!("CheckList: updated task '{}' status to '{}'", id, new_status),
+                summary: format!("status: OK\ntask: '{}' -> {}", id, new_status),
             },
             Err(e) => CommandOutcome::Failure {
                 error: format!("Failed to save checklist: {}", e),

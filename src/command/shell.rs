@@ -20,13 +20,6 @@ pub async fn execute(blocks: Vec<ShellBlock>) -> Result<Vec<CommandResult>, anyh
         if block.is_async {
             let handle = tokio::spawn(async move { run_shell_async(&block.command, i).await });
             handles.push(handle);
-            results.push(CommandResult {
-                command_type: CommandType::Shell,
-                block_index: i,
-                outcome: CommandOutcome::Success {
-                    summary: "async exec the command, will notify when done".to_string(),
-                },
-            });
         } else {
             let timeout = if command_uses_find(&block.command) {
                 Duration::from_secs(10)
@@ -78,6 +71,29 @@ pub fn safety_check(command: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn test_run_shell_async_captures_output() {
+        let blocks = vec![ShellBlock {
+            command: "echo hello-async-capture".to_string(),
+            is_async: true,
+        }];
+        let results = execute(blocks).await.unwrap();
+        // Wait for all handles to complete - the execute function already does this
+        let all_summaries: Vec<String> = results
+            .iter()
+            .filter_map(|r| match &r.outcome {
+                CommandOutcome::Success { summary } => Some(summary.clone()),
+                _ => None,
+            })
+            .collect();
+        let combined = all_summaries.join("\n");
+        assert!(
+            combined.contains("-async-capture"),
+            "async shell should capture stdout but got: {}",
+            combined
+        );
+    }
 
     #[test]
     fn test_safety_check_sudo() {
@@ -153,7 +169,7 @@ async fn run_shell_sync(
     info!("Executing sync shell: {}", command);
 
     let result = tokio::time::timeout(timeout_dur, async {
-        let output = tokio::process::Command::new("nu")
+        let output = tokio::process::Command::new("bash")
             .arg("-c")
             .arg(command)
             .output()
@@ -164,15 +180,15 @@ async fn run_shell_sync(
                 let stdout = String::from_utf8_lossy(&out.stdout).to_string();
                 let stderr = String::from_utf8_lossy(&out.stderr).to_string();
                 let (stdout, stderr) = truncate_output(stdout, stderr);
+                let exit_code = out.status.code().unwrap_or(-1);
+                let status = if exit_code == 0 { "OK" } else { "FAILED" };
                 CommandResult {
                     command_type: CommandType::Shell,
                     block_index,
                     outcome: CommandOutcome::Success {
                         summary: format!(
-                            "exit_code: {}\nstdout: {}\nstderr: {}",
-                            out.status.code().unwrap_or(-1),
-                            stdout,
-                            stderr
+                            "status: {}\nexit_code: {}\nstdout:\n{}\nstderr:\n{}",
+                            status, exit_code, stdout, stderr
                         ),
                     },
                 }
@@ -195,9 +211,9 @@ async fn run_shell_sync(
             block_index,
             outcome: CommandOutcome::Failure {
                 error: if timeout_dur.as_secs() <= 10 {
-                    "command timed out quickly (10s). Try using rg instead of find, or use is_async=true.".into()
+                    "status: TIMEOUT (10s). Use rg instead of find for file search, or set is_async=true for slow commands.".into()
                 } else {
-                    "command timed out. Consider using is_async=true for long-running commands."
+                    "status: TIMEOUT (120s). Consider using is_async=true for long-running commands."
                         .into()
                 },
             },
@@ -207,19 +223,39 @@ async fn run_shell_sync(
 
 async fn run_shell_async(command: &str, block_index: usize) -> Option<CommandResult> {
     info!("Executing async shell: {}", command);
-    let _ = tokio::process::Command::new("nu")
+
+    let output = tokio::process::Command::new("bash")
         .arg("-c")
         .arg(command)
-        .spawn()
-        .ok()?;
+        .output()
+        .await;
 
-    Some(CommandResult {
-        command_type: CommandType::Shell,
-        block_index,
-        outcome: CommandOutcome::Success {
-            summary: "async exec the command, will notify when done".to_string(),
-        },
-    })
+    match output {
+        Ok(out) => {
+            let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+            let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+            let (stdout, stderr) = truncate_output(stdout, stderr);
+            let exit_code = out.status.code().unwrap_or(-1);
+            let status = if exit_code == 0 { "OK" } else { "FAILED" };
+            Some(CommandResult {
+                command_type: CommandType::Shell,
+                block_index,
+                outcome: CommandOutcome::Success {
+                    summary: format!(
+                        "status: {}\nexit_code: {}\nstdout:\n{}\nstderr:\n{}",
+                        status, exit_code, stdout, stderr
+                    ),
+                },
+            })
+        }
+        Err(e) => Some(CommandResult {
+            command_type: CommandType::Shell,
+            block_index,
+            outcome: CommandOutcome::Failure {
+                error: format!("command spawn error: {}", e),
+            },
+        }),
+    }
 }
 
 fn command_uses_find(cmd: &str) -> bool {

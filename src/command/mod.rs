@@ -42,8 +42,12 @@ impl CommandWatcher {
         self.buffer.push_str(token);
 
         loop {
-            let (cmds, new_scan) = self.parser.extract_commands_from(&self.buffer, self.last_scan);
+            let (cmds, new_scan, warnings) = self.parser.extract_commands_from(&self.buffer, self.last_scan);
             self.last_scan = new_scan;
+
+            for w in &warnings {
+                tracing::warn!("Parser warning (mid-stream): {}", w.message);
+            }
 
             if cmds.is_empty() {
                 break;
@@ -68,13 +72,17 @@ impl CommandWatcher {
         }
     }
 
-    pub fn finalize(&mut self) -> Vec<NCommand> {
-        let (cmds, _) = self
+    pub fn finalize(&mut self) -> (Vec<NCommand>, Vec<String>) {
+        let (cmds, _, warnings) = self
             .parser
             .extract_commands_from_final(&self.buffer, self.last_scan);
+        let warn_msgs: Vec<String> = warnings.iter().map(|w| w.message.clone()).collect();
+        for w in &warn_msgs {
+            tracing::warn!("Parser warning (final): {}", w);
+        }
         self.buffer.clear();
         self.last_scan = 0;
-        cmds
+        (cmds, warn_msgs)
     }
 
     pub fn clear(&mut self) {
@@ -197,7 +205,7 @@ pub fn format_command_results(results: &[CommandResult]) -> String {
         return String::new();
     }
 
-    let mut out = String::from("<(<(SYSTEM\n");
+    let mut out = String::from("【|SYSTEM|】\n");
 
     for r in results {
         match r.command_type {
@@ -227,7 +235,7 @@ pub fn format_command_results(results: &[CommandResult]) -> String {
         }
     }
 
-    out.push_str(")>)>");
+    out.push_str("【|SYSTEM|】");
     out
 }
 
@@ -258,13 +266,13 @@ mod tests {
     async fn test_full_pipeline_single_shell_chunked() {
         let mut watcher = CommandWatcher::new();
 
-        watcher.feed_token("<<<[Shell");
-        watcher.feed_token("]>>>\n");
-        watcher.feed_token("「command」:「「echo hello-world」」\n");
-        watcher.feed_token("「is_async」:「「false」」\n");
-        watcher.feed_token("<<<[__END__]>>>");
+        watcher.feed_token("《[Shell");
+        watcher.feed_token("]|Ncoder|》\n");
+        watcher.feed_token("【command】echo hello-world【command】\n");
+        watcher.feed_token("【is_async】false【is_async】\n");
+        watcher.feed_token("《[End]|Shell|》");
 
-        let remaining = watcher.finalize();
+        let (remaining, _warnings) = watcher.finalize();
         assert!(remaining.is_empty(), "all commands should be extracted mid-stream");
 
         let results = watcher.drain_results().await;
@@ -277,13 +285,13 @@ mod tests {
         let mut watcher = CommandWatcher::new();
 
         watcher.feed_token(
-            "<<<[Shell]>>>\n\
-             「command」:「「echo test-single」」\n\
-             「is_async」:「「false」」\n\
-             <<<[__END__]>>>",
+            "《[Shell]|Ncoder|》\n\
+             【command】echo test-single【command】\n\
+             【is_async】false【is_async】\n\
+             《[End]|Shell|》",
         );
 
-        let remaining = watcher.finalize();
+        let (remaining, _warnings) = watcher.finalize();
         assert!(remaining.is_empty());
 
         let results = watcher.drain_results().await;
@@ -296,15 +304,15 @@ mod tests {
         let mut watcher = CommandWatcher::new();
 
         watcher.feed_token(
-            "<<<[Shell]>>>\n\
-             「command」:「「echo first」」\n\
-             <<<[__END__]>>>\n\
-             <<<[Shell]>>>\n\
-             「command」:「「echo second」」\n\
-             <<<[__END__]>>>",
+            "《[Shell]|Ncoder|》\n\
+             【command】echo first【command】\n\
+             《[End]|Shell|》\n\
+             《[Shell]|Ncoder|》\n\
+             【command】echo second【command】\n\
+             《[End]|Shell|》",
         );
 
-        let remaining = watcher.finalize();
+        let (remaining, _warnings) = watcher.finalize();
         assert!(remaining.is_empty());
 
         let results = watcher.drain_results().await;
@@ -318,16 +326,16 @@ mod tests {
         let mut watcher = CommandWatcher::new();
 
         watcher.feed_token(
-            "<<<[Shell]>>>\n\
-             「command」:「「echo no-end」」",
+            "《[Shell]|Ncoder|》\n\
+             【command】echo no-end【command】",
         );
 
         // No __END__ marker — should still be parsed
         // After feeding, the body extends to end of buffer, parse_key_values should work
-        let remaining = watcher.finalize();
+        let (remaining, _warnings) = watcher.finalize();
         // The command may have been extracted mid-stream OR left for finalize
         let mut all_cmds = remaining;
-        all_cmds.append(&mut watcher.finalize());
+        {let (mut extra, _) = watcher.finalize(); all_cmds.append(&mut extra);};
 
         if !all_cmds.is_empty() {
             let results = execute_commands(all_cmds).await;
@@ -343,14 +351,14 @@ mod tests {
         let mut watcher = CommandWatcher::new();
 
         watcher.feed_token(
-            "<<<[Shell]>>>\n\
-             「command」:「「echo block-a」」\n\
+            "《[Shell]|Ncoder|》\n\
+             【command】echo block-a【command】\n\
              ---\n\
-             「command」:「「echo block-b」」\n\
-             <<<[__END__]>>>",
+             【command】echo block-b【command】\n\
+             《[End]|Shell|》",
         );
 
-        let remaining = watcher.finalize();
+        let (remaining, _warnings) = watcher.finalize();
         assert!(remaining.is_empty());
 
         let results = watcher.drain_results().await;
@@ -364,15 +372,15 @@ mod tests {
         let mut watcher = CommandWatcher::new();
 
         watcher.feed_token(
-            "<<<[Shell]>>>\n\
-             「command」:「「echo shell-cmd」」\n\
-             <<<[__END__]>>>\n\
-             <<<[Shell]>>>\n\
-             「command」:「「echo shell-cmd2」」\n\
-             <<<[__END__]>>>",
+            "《[Shell]|Ncoder|》\n\
+             【command】echo shell-cmd【command】\n\
+             《[End]|Shell|》\n\
+             《[Shell]|Ncoder|》\n\
+             【command】echo shell-cmd2【command】\n\
+             《[End]|Shell|》",
         );
 
-        let remaining = watcher.finalize();
+        let (remaining, _warnings) = watcher.finalize();
         assert!(remaining.is_empty());
 
         let results = watcher.drain_results().await;
@@ -391,15 +399,15 @@ mod tests {
             command_type: CommandType::Shell,
             block_index: 0,
             outcome: CommandOutcome::Success {
-                summary: "exit_code: 0\nstdout: hello\nstderr: ".into(),
+                summary: "status: OK\nexit_code: 0\nstdout:\nhello\nstderr:\n".into(),
             },
         }];
 
         let formatted = format_command_results(&results);
-        assert!(formatted.contains("<(<(SYSTEM"));
+        assert!(formatted.starts_with("【|SYSTEM|】"));
         assert!(formatted.contains("[ShellResult]"));
         assert!(formatted.contains("hello"));
-        assert!(formatted.contains(")>)>"));
+        assert!(formatted.ends_with("【|SYSTEM|】"));
     }
 
     #[test]
@@ -420,14 +428,14 @@ mod tests {
     async fn test_real_world_model_output_shell() {
         let mut watcher = CommandWatcher::new();
 
-        let text = "<<<[Shell]>>>
-「command」:「「ls -a」」
-「is_async」:「「false」」
-<<<[__END__]>>>";
+        let text = "《[Shell]|Ncoder|》
+【command】ls -a【command】
+【is_async】false【is_async】
+《[End]|Shell|》";
 
         watcher.feed_token(text);
         let drain = watcher.drain_results().await;
-        let remaining = watcher.finalize();
+        let (remaining, _warnings) = watcher.finalize();
 
         assert!(!drain.is_empty() || !remaining.is_empty(),
             "no commands extracted from real-world text");
@@ -437,10 +445,10 @@ mod tests {
     async fn test_real_world_model_output_files_operator() {
         let mut watcher = CommandWatcher::new();
 
-        let text = "Shell 似乎有些问题，我用 FilesOperator 来读取文件：\n\n<<<[FilesOperator]>>>\n「mode」:「「read」」\n「path」:「「./flake.nix」」\n<<<[__END__]>>>";
+        let text = "Shell 似乎有些问题，我用 FilesOperator 来读取文件：\n\n《[FilesOperator]|Ncoder|》\n【mode】read【mode】\n【path】./flake.nix【path】\n《[End]|FilesOperator|》";
         watcher.feed_token(text);
 
-        let remaining = watcher.finalize();
+        let (remaining, _warnings) = watcher.finalize();
         if !remaining.is_empty() {
             let results = execute_commands(remaining).await;
             let _ = format_command_results(&results);
@@ -455,16 +463,16 @@ mod tests {
     async fn test_real_world_interleaved_reasoning_and_commands() {
         let mut watcher = CommandWatcher::new();
 
-        watcher.feed_token("用户想查看目录结构。在 nushell 中使用 ls -a。\n\n");
-        watcher.feed_token("<<<[Shell]>>>\n");
-        watcher.feed_token("「command」:「「ls -a」」\n");
-        watcher.feed_token("<<<[__END__]>>>\n");
+        watcher.feed_token("用户想查看目录结构。使用 ls -la 查看。\n\n");
+        watcher.feed_token("《[Shell]|Ncoder|》\n");
+        watcher.feed_token("【command】ls -a【command】\n");
+        watcher.feed_token("《[End]|Shell|》\n");
         watcher.feed_token("现在让我查看文件内容。\n");
-        watcher.feed_token("<<<[Shell]>>>\n");
-        watcher.feed_token("「command」:「「cat Cargo.toml」」\n");
-        watcher.feed_token("<<<[__END__]>>>");
+        watcher.feed_token("《[Shell]|Ncoder|》\n");
+        watcher.feed_token("【command】cat Cargo.toml【command】\n");
+        watcher.feed_token("《[End]|Shell|》");
 
-        let remaining = watcher.finalize();
+        let (remaining, _warnings) = watcher.finalize();
         if !remaining.is_empty() {
             let results = execute_commands(remaining).await;
             let _ = format_command_results(&results);
@@ -478,9 +486,9 @@ mod tests {
     #[tokio::test]
     async fn test_full_pipeline_verify_result_format() {
         let mut watcher = CommandWatcher::new();
-        watcher.feed_token("<<<[Shell]>>>\n「command」:「「echo verify-pipeline」」\n<<<[__END__]>>>");
+        watcher.feed_token("《[Shell]|Ncoder|》\n【command】echo verify-pipeline【command】\n《[End]|Shell|》");
 
-        let remaining = watcher.finalize();
+        let (remaining, _warnings) = watcher.finalize();
         let results = if !remaining.is_empty() {
             execute_commands(remaining).await
         } else {
@@ -490,9 +498,8 @@ mod tests {
         assert!(!results.is_empty());
 
         let injection = format_command_results(&results);
-        assert!(injection.contains("<(<(SYSTEM"));
+        assert!(injection.contains("【|SYSTEM|】"));
         assert!(injection.contains("[ShellResult]"));
         assert!(injection.contains("verify-pipeline"));
-        assert!(injection.contains(")>)>"));
     }
 }

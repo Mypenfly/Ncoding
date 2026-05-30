@@ -85,6 +85,7 @@ pub enum TuiEvent {
     ContentChunk(String),
     StreamDone { usage: Option<UsageInfo> },
     CommandsCompleted { results: Vec<CommandResult> },
+    SessionRenamed(String),
     Error(String),
 }
 
@@ -269,10 +270,9 @@ impl DeepSeekClient {
     pub async fn generate_session_name(
         &self,
         user_input: &str,
-        sub_model: &str,
     ) -> Result<String, anyhow::Error> {
         let prompt = format!(
-            "为以下对话生成一个简短的 slug 标题（2-5 词，小写，用连字符连接，不要带任何其他内容,语言使用和下文一直的语言）：\n{}",
+            "根据给出的用户输入，猜测用户意图，生成一个session标题，直接给出结果，不要超过15个字：\n{}",
             user_input
         );
 
@@ -283,10 +283,13 @@ impl DeepSeekClient {
         }];
 
         let request = ChatRequest {
-            model: sub_model.to_string(),
+            model: self.model.clone(),
             messages,
             stream: false,
-            thinking: None,
+            thinking: Some(ThinkingConfig {
+                thinking_type: "disabled".into(),
+                reasoning_effort: "low".into(),
+            }),
             max_tokens: Some(64),
             temperature: 0.3,
             top_p: 1.0,
@@ -324,12 +327,18 @@ impl DeepSeekClient {
             .and_then(|c| c.message.content.as_deref())
             .unwrap_or("new-session")
             .trim()
-            .to_lowercase()
             .chars()
-            .filter(|c| c.is_alphanumeric() || *c == '-')
-            .collect::<String>();
+            .filter(|c| !c.is_control() && *c != '/' && *c != '\\' && *c != '\0')
+            .take(50)
+            .collect::<String>()
+            .trim()
+            .to_string();
 
-        Ok(name)
+        if name.is_empty() {
+            Ok("new-session".into())
+        } else {
+            Ok(name)
+        }
     }
 }
 

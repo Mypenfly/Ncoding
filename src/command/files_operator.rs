@@ -9,6 +9,20 @@ pub async fn execute(blocks: Vec<FileOpBlock>) -> Result<Vec<CommandResult>, any
     let mut results = Vec::new();
 
     for (i, block) in blocks.into_iter().enumerate() {
+        if block.path.as_os_str().is_empty() {
+            let missing_keys = check_missing_keys(&block);
+            results.push(CommandResult {
+                command_type: CommandType::FilesOperator,
+                block_index: i,
+                outcome: CommandOutcome::Failure {
+                    error: format!(
+                        "path is empty. The 【path】key may be malformed or missing a closing 】. {}",
+                        missing_keys
+                    ),
+                },
+            });
+            continue;
+        }
         let base_path = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
 
         let resolved = match resolve_path(&block.path, &base_path) {
@@ -129,7 +143,7 @@ fn read_file(
 
     let lines_range = read_start.map(|s| format!("{}..{}", s, read_end));
     let summary = format!(
-        "mode: read\npath: {}\nlines: {}{}",
+        "status: OK\npath: {}\nlines: {}{}",
         path.display(),
         lines_range.unwrap_or_else(|| "N/A".into()),
         if read_end > 0 { "\n".to_string() + &output } else { String::new() }
@@ -153,7 +167,7 @@ fn write_file(path: &PathBuf, content: Option<&str>) -> CommandOutcome {
     match fs::write(path, content) {
         Ok(()) => CommandOutcome::Success {
             summary: format!(
-                "mode: write\npath: {}\nresult: {}",
+                "status: OK\npath: {}\naction: {}",
                 path.display(),
                 if path.exists() { "overwritten" } else { "created" }
             ),
@@ -204,7 +218,7 @@ fn edit_file(
             match fs::write(path, &new_content) {
                 Ok(()) => CommandOutcome::Success {
                     summary: format!(
-                        "mode: edit\npath: {}\nresult: success (1 replacement at line {})",
+                        "status: OK\npath: {}\nreplaced: 1 occurrence at line {}",
                         path.display(),
                         start_line
                     ),
@@ -231,6 +245,19 @@ fn edit_file(
                 ),
             }
         }
+    }
+}
+
+fn check_missing_keys(block: &FileOpBlock) -> String {
+    let mut missing = Vec::new();
+    if block.path.as_os_str().is_empty() { missing.push("path"); }
+    if block.mode != FileMode::Read && block.content.is_none() && block.old_str.is_none() {
+        missing.push("content or old_str/new_str");
+    }
+    if missing.is_empty() {
+        String::from("Check key syntax: 【key】value【key】")
+    } else {
+        format!("Missing or malformed keys: {}", missing.join(", "))
     }
 }
 
@@ -315,7 +342,7 @@ use std::path::{Path, PathBuf};
         let result = edit_file(&path, Some("fn main() {"), Some("#[tokio::main]\nasync fn main() {"));
         match result {
             CommandOutcome::Success { summary } => {
-                assert!(summary.contains("success"));
+                assert!(summary.contains("status: OK"));
                 let content = std::fs::read_to_string(&path).unwrap();
                 assert!(content.contains("#[tokio::main]"));
                 assert!(content.contains("async fn main()"));
