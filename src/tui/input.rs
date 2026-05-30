@@ -47,6 +47,80 @@ impl InputState {
         self.cursor = self.text.len();
     }
 
+    pub fn insert_newline(&mut self) {
+        if self.cursor <= self.text.len() {
+            self.text.insert(self.cursor, '\n');
+            self.cursor += 1;
+        }
+    }
+
+    /// Split text into visual lines, wrapping at `max_width`.
+    /// Each logical line (separated by \n) is wrapped independently.
+    pub fn visual_lines(&self, max_width: usize) -> Vec<String> {
+        if max_width == 0 {
+            return vec![self.text.clone()];
+        }
+        let mut result = Vec::new();
+        for logical_line in self.text.split('\n') {
+            let line_lines = Self::wrap_line(logical_line, max_width);
+            result.extend(line_lines);
+        }
+        result
+    }
+
+    fn wrap_line(line: &str, max_width: usize) -> Vec<String> {
+        if max_width == 0 {
+            return vec![line.to_string()];
+        }
+        if line.is_empty() {
+            return vec![String::new()];
+        }
+        let mut lines = Vec::new();
+        let mut current = String::new();
+        for c in line.chars() {
+            let c_width = unicode_width::UnicodeWidthChar::width(c).unwrap_or(1);
+            let cur_width = unicode_width::UnicodeWidthStr::width(current.as_str());
+            if cur_width + c_width > max_width && !current.is_empty() {
+                lines.push(std::mem::take(&mut current));
+            }
+            current.push(c);
+        }
+        if !current.is_empty() {
+            lines.push(current);
+        }
+        lines
+    }
+
+    /// Returns (visual_row, visual_column) of cursor in multi-line display.
+    /// max_width is the available character width of the input area.
+    pub fn cursor_visual_position(&self, max_width: usize) -> (usize, usize) {
+        if max_width == 0 || self.text.is_empty() {
+            return (0, self.cursor);
+        }
+        let text_before = &self.text[..self.cursor];
+        let mut row = 0usize;
+        let mut line_pos = 0usize;
+
+        for c in text_before.chars() {
+            if c == '\n' {
+                row += 1;
+                line_pos = 0;
+                continue;
+            }
+            let c_width = unicode_width::UnicodeWidthChar::width(c).unwrap_or(1);
+            if line_pos + c_width > max_width && line_pos > 0 {
+                row += 1;
+                line_pos = 0;
+            }
+            line_pos += c_width;
+        }
+        (row, line_pos)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.text.is_empty()
+    }
+
     pub fn clear(&mut self) {
         self.text.clear();
         self.cursor = 0;
@@ -295,4 +369,200 @@ mod tests {
         assert_eq!(input.text, "你好世界！测试一下");
         assert_eq!(input.cursor, "你好世界！测试一下".len());
     }
+
+    // --- Multi-line tests ---
+
+    #[test]
+    fn test_insert_newline_middle() {
+        let mut input = InputState::new();
+        input.insert_char('a');
+        input.insert_char('b');
+        input.insert_newline();
+        input.insert_char('c');
+        assert_eq!(input.text, "ab\nc");
+        assert_eq!(input.cursor, 4);
+    }
+
+    #[test]
+    fn test_insert_newline_at_start() {
+        let mut input = InputState::new();
+        input.insert_char('a');
+        input.move_home();
+        input.insert_newline();
+        assert_eq!(input.text, "\na");
+        assert_eq!(input.cursor, 1);
+    }
+
+    #[test]
+    fn test_visual_lines_single() {
+        let mut input = InputState::new();
+        for c in "hello".chars() {
+            input.insert_char(c);
+        }
+        let lines = input.visual_lines(10);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0], "hello");
+    }
+
+    #[test]
+    fn test_visual_lines_wrap() {
+        let mut input = InputState::new();
+        for c in "hello world".chars() {
+            input.insert_char(c);
+        }
+        let lines = input.visual_lines(5);
+        assert_eq!(lines.len(), 3);
+        assert_eq!(lines[0], "hello");
+        assert_eq!(lines[1], " worl");
+        assert_eq!(lines[2], "d");
+    }
+
+    #[test]
+    fn test_visual_lines_with_newlines() {
+        let mut input = InputState::new();
+        for c in "ab\ncd".chars() {
+            input.insert_char(c);
+        }
+        let lines = input.visual_lines(10);
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0], "ab");
+        assert_eq!(lines[1], "cd");
+    }
+
+    #[test]
+    fn test_visual_lines_trailing_newline() {
+        let mut input = InputState::new();
+        for c in "ab\n".chars() {
+            input.insert_char(c);
+        }
+        let lines = input.visual_lines(10);
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0], "ab");
+        assert_eq!(lines[1], "");
+    }
+
+    #[test]
+    fn test_visual_lines_newline_wrap() {
+        let mut input = InputState::new();
+        for c in "hello\nworld".chars() {
+            input.insert_char(c);
+        }
+        let lines = input.visual_lines(3);
+        assert_eq!(lines.len(), 4);
+        assert_eq!(lines[0], "hel");
+        assert_eq!(lines[1], "lo");
+        assert_eq!(lines[2], "wor");
+        assert_eq!(lines[3], "ld");
+    }
+
+    #[test]
+    fn test_cursor_visual_position_single_line() {
+        let mut input = InputState::new();
+        for c in "hello".chars() {
+            input.insert_char(c);
+        }
+        let (row, col) = input.cursor_visual_position(10);
+        assert_eq!(row, 0);
+        assert_eq!(col, 5);
+    }
+
+    #[test]
+    fn test_cursor_visual_position_multiline() {
+        let mut input = InputState::new();
+        for c in "ab\ncd".chars() {
+            input.insert_char(c);
+        }
+        let (row, col) = input.cursor_visual_position(10);
+        assert_eq!(row, 1);
+        assert_eq!(col, 2);
+    }
+
+    #[test]
+    fn test_cursor_visual_wrapped() {
+        let mut input = InputState::new();
+        for c in "hello world".chars() {
+            input.insert_char(c);
+        }
+        let (row, col) = input.cursor_visual_position(5);
+        assert_eq!(row, 2);
+ assert_eq!(col, 1);
+    }
+
+    #[test]
+    fn test_cursor_visual_position_at_wrap_boundary() {
+        let mut input = InputState::new();
+        for c in "hello".chars() {
+            input.insert_char(c);
+        }
+        let (row, col) = input.cursor_visual_position(5);
+        assert_eq!(row, 0);
+        assert_eq!(col, 5);
+
+        input.insert_char('x');
+        let (row, col) = input.cursor_visual_position(5);
+        assert_eq!(row, 1);
+        assert_eq!(col, 1);
+    }
+
+    #[test]
+    fn test_visual_lines_width_one() {
+        let mut input = InputState::new();
+        for c in "abc".chars() {
+            input.insert_char(c);
+        }
+        let lines = input.visual_lines(1);
+        assert_eq!(lines.len(), 3);
+        assert_eq!(lines[0], "a");
+        assert_eq!(lines[1], "b");
+        assert_eq!(lines[2], "c");
+    }
+
+    #[test]
+    fn test_visual_lines_cjk_wrap() {
+        let mut input = InputState::new();
+        for c in "你好世界".chars() {
+            input.insert_char(c);
+        }
+        let lines = input.visual_lines(5);
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0], "你好");
+        assert_eq!(lines[1], "世界");
+    }
+
+    #[test]
+    fn test_cursor_visual_position_multiline_with_wrap() {
+        let mut input = InputState::new();
+        for c in "ab\ncde".chars() {
+            input.insert_char(c);
+        }
+        let (row, col) = input.cursor_visual_position(3);
+        assert_eq!(row, 1);
+        assert_eq!(col, 3);
+    }
+
+    #[test]
+    fn test_is_empty_after_clear() {
+        let mut input = InputState::new();
+        input.insert_char('a');
+        input.clear();
+        assert!(input.is_empty());
+        assert_eq!(input.cursor, 0);
+    }
+
+    #[test]
+    fn test_visual_lines_empty_text() {
+        let input = InputState::new();
+        let lines = input.visual_lines(10);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0], "");
+    }
+
+    #[test]
+    fn test_cursor_visual_position_empty_text() {
+        let input = InputState::new();
+        let (row, col) = input.cursor_visual_position(10);
+        assert_eq!(row, 0);
+        assert_eq!(col, 0);
+    }
 }
+

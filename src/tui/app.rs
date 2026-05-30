@@ -1,7 +1,7 @@
 use std::io;
 
 use crossterm::{
-    event::{self, Event, KeyCode, KeyModifiers},
+    event::{self, Event, KeyCode, KeyModifiers, KeyboardEnhancementFlags, PushKeyboardEnhancementFlags, PopKeyboardEnhancementFlags},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -14,7 +14,6 @@ use ratatui::{
     Frame, Terminal,
 };
 use tokio::sync::mpsc;
-use unicode_width::UnicodeWidthStr;
 use tracing::info;
 
 use crate::{
@@ -27,6 +26,7 @@ use crate::{
     session::manager::{Message, Role, SessionManager},
 };
 
+use super::input::InputState;
 use super::theme::Theme;
 
 pub type TuiTerminal = Terminal<CrosstermBackend<io::Stdout>>;
@@ -44,10 +44,11 @@ pub struct App {
     session_mgr: SessionManager,
     auto_continue_count: u32,
     state: AppState,
-    input: String,
-    cursor_pos: usize,
+    input_state: InputState,
     scroll_offset: usize,
     auto_scroll: bool,
+    last_draw_lines: std::cell::Cell<usize>,
+    last_visible_h: std::cell::Cell<usize>,
     is_streaming: bool,
     thinking_text: String,
     content_text: String,
@@ -61,13 +62,24 @@ pub struct App {
 pub fn init_terminal() -> io::Result<TuiTerminal> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
+    execute!(
+        stdout,
+        EnterAlternateScreen,
+        PushKeyboardEnhancementFlags(
+            KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+                | KeyboardEnhancementFlags::REPORT_EVENT_TYPES
+        )
+    )?;
     Terminal::new(CrosstermBackend::new(stdout))
 }
 
 pub fn restore_terminal(terminal: &mut TuiTerminal) -> io::Result<()> {
+    execute!(
+        terminal.backend_mut(),
+        PopKeyboardEnhancementFlags,
+        LeaveAlternateScreen
+    )?;
     disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     terminal.show_cursor()
 }
 
@@ -114,10 +126,11 @@ impl App {
             session_mgr,
             auto_continue_count: 0,
             state: AppState::Stop,
-            input: String::new(),
-            cursor_pos: 0,
+            input_state: InputState::new(),
             scroll_offset: 0,
             auto_scroll: true,
+            last_draw_lines: std::cell::Cell::new(0),
+            last_visible_h: std::cell::Cell::new(0),
             is_streaming: false,
             thinking_text: String::new(),
             content_text: String::new(),
@@ -152,43 +165,77 @@ impl App {
                     }
 
                     match key.code {
-                        KeyCode::Enter if !self.input.is_empty() => {
-                            let input_text = std::mem::take(&mut self.input);
-                            self.cursor_pos = 0;
+                        KeyCode::Enter
+                            if key.modifiers.contains(KeyModifiers::SHIFT)
+                                || key.modifiers.contains(KeyModifiers::ALT)
+                                || key.modifiers.contains(KeyModifiers::CONTROL) =>
+                        {
+                            self.input_state.insert_newline();
+                        }
+                        KeyCode::Enter if !self.input_state.is_empty() => {
+                            let input_text = self.input_state.take();
                             if input_text.starts_with('/') {
                                 self.handle_slash_command(input_text).await;
                             } else {
                                 self.handle_user_input(input_text).await;
                             }
                         }
-                        KeyCode::Char(c) if self.cursor_pos <= self.input.len() => {
-                            self.input.insert(self.cursor_pos, c);
-                            self.cursor_pos += c.len_utf8();
+                        KeyCode::Char(c) => {
+                            self.input_state.insert_char(c);
                         }
-                        KeyCode::Backspace if self.cursor_pos > 0 => {
-                            self.cursor_pos = self.prev_char_boundary(self.cursor_pos);
-                            self.input.remove(self.cursor_pos);
+                        KeyCode::Backspace => {
+                            self.input_state.delete_before_cursor();
                         }
-                        KeyCode::Left if self.cursor_pos > 0 => {
-                            self.cursor_pos = self.prev_char_boundary(self.cursor_pos);
+                        KeyCode::Left => {
+                            self.input_state.move_left();
                         }
-                        KeyCode::Right if self.cursor_pos < self.input.len() => {
-                            self.cursor_pos = self.next_char_boundary(self.cursor_pos);
+                        KeyCode::Right => {
+                            self.input_state.move_right();
                         }
-                        KeyCode::Home => self.cursor_pos = 0,
-                        KeyCode::End => self.cursor_pos = self.input.len(),
-                        KeyCode::Up if self.scroll_offset > 0 => {
-                            self.scroll_offset -= 1;
-                            self.auto_scroll = false;
+                        KeyCode::Home => self.input_state.move_home(),
+                        KeyCode::End => self.input_state.move_end(),
+                        KeyCode::Up => {
+                            let total = self.last_draw_lines.get();
+                            let vis = self.last_visible_h.get();
+                            if self.auto_scroll {
+                                self.auto_scroll = false;
+                                self.scroll_offset = total.saturating_sub(vis);
+                            }
+                            self.scroll_offset = self.scroll_offset.saturating_sub(1);
                         }
                         KeyCode::Down => {
-                            self.scroll_offset += 1;
+                            if self.auto_scroll {
+                                continue;
+                            }
+                            let total = self.last_draw_lines.get();
+                            let vis = self.last_visible_h.get();
+                            self.scroll_offset = (self.scroll_offset + 1)
+                                .min(total.saturating_sub(1));
+                            if self.scroll_offset >= total.saturating_sub(vis) {
+                                self.auto_scroll = true;
+                            }
                         }
                         KeyCode::PageUp => {
+                            let total = self.last_draw_lines.get();
+                            let vis = self.last_visible_h.get();
+                            if self.auto_scroll {
+                                self.auto_scroll = false;
+                                self.scroll_offset = total.saturating_sub(vis);
+                            }
                             self.scroll_offset = self.scroll_offset.saturating_sub(10);
-                            self.auto_scroll = false;
                         }
-                        KeyCode::PageDown => self.scroll_offset += 10,
+                        KeyCode::PageDown => {
+                            if self.auto_scroll {
+                                continue;
+                            }
+                            let total = self.last_draw_lines.get();
+                            let vis = self.last_visible_h.get();
+                            self.scroll_offset = (self.scroll_offset + 10)
+                                .min(total.saturating_sub(1));
+                            if self.scroll_offset >= total.saturating_sub(vis) {
+                                self.auto_scroll = true;
+                            }
+                        }
                         _ => {}
                     }
                 }
@@ -681,31 +728,23 @@ impl App {
         }
     }
 
-    fn prev_char_boundary(&self, pos: usize) -> usize {
-        let mut p = pos - 1;
-        while p > 0 && !self.input.is_char_boundary(p) {
-            p -= 1;
-        }
-        p
-    }
-
-    fn next_char_boundary(&self, pos: usize) -> usize {
-        let mut p = pos + 1;
-        while p < self.input.len() && !self.input.is_char_boundary(p) {
-            p += 1;
-        }
-        p
-    }
-
     fn draw(&self, f: &mut Frame) {
         let theme = Theme::everforest();
         let area = f.area();
 
+        let input_vis = self.input_state.visual_lines(
+            area.width.saturating_sub(4) as usize
+        );
+        let input_h = (input_vis.len().max(1).max(
+            self.input_state.text.lines().count()
+        ).min(8) + 2) as u16;
+
         let chunks = Layout::vertical([
             Constraint::Length(1),
             Constraint::Min(1),
+            Constraint::Length(2),
             Constraint::Length(1),
-            Constraint::Length(3),
+            Constraint::Length(input_h),
             Constraint::Length(1),
         ])
         .split(area);
@@ -827,11 +866,14 @@ impl App {
             }
         }
 
+        self.last_draw_lines.set(lines.len());
+        let visible_h = text_area.height.saturating_sub(1) as usize;
+        self.last_visible_h.set(visible_h);
+
         let effective_offset = if self.auto_scroll {
-            let visible_h = text_area.height.saturating_sub(1) as usize;
             lines.len().saturating_sub(visible_h)
         } else {
-            self.scroll_offset
+            self.scroll_offset.min(lines.len().saturating_sub(visible_h))
         };
 
         let visible_lines: Vec<Line> = lines.into_iter().skip(effective_offset).collect();
@@ -841,7 +883,7 @@ impl App {
             .wrap(Wrap { trim: false });
         f.render_widget(text_widget, text_area);
 
-        let token_bar = chunks[2];
+        let token_bar = chunks[3];
         let token_text = if self.token_info.is_empty() {
             "Tokens · --"
         } else {
@@ -853,11 +895,11 @@ impl App {
             token_bar,
         );
 
-        let input_area = chunks[3];
-        let input_display = if self.input.is_empty() {
+        let input_area = chunks[4];
+        let input_display = if self.input_state.text.is_empty() {
             "> _"
         } else {
-            &self.input
+            &self.input_state.text
         };
         let input_style = if self.is_streaming {
             Style::default().fg(theme.grey2)
@@ -870,19 +912,20 @@ impl App {
                     .borders(Borders::ALL)
                     .border_style(Style::default().fg(theme.aqua)),
             )
-            .style(input_style);
+            .style(input_style)
+            .wrap(Wrap { trim: false });
         f.render_widget(input_widget, input_area);
 
         if !self.is_streaming {
-            let text_before_cursor = &self.input[..self.cursor_pos];
-            let display_width = UnicodeWidthStr::width(text_before_cursor);
-            let cursor_x = input_area.x + 1 + display_width as u16;
-            let cursor_y = input_area.y + 1;
-            let clamped_x = cursor_x.min(input_area.right().saturating_sub(2));
-            f.set_cursor_position((clamped_x, cursor_y));
+            let input_w = input_area.width.saturating_sub(2) as usize;
+            let (cursor_row, cursor_col) = self.input_state.cursor_visual_position(input_w);
+            let cursor_x = input_area.x + 1 + cursor_col as u16;
+            let cursor_y = (input_area.y + 1 + cursor_row as u16)
+                .min(input_area.bottom().saturating_sub(2));
+            f.set_cursor_position((cursor_x.min(input_area.right().saturating_sub(2)), cursor_y));
         }
 
-        let status_bar = chunks[4];
+        let status_bar = chunks[5];
         let status_line = Line::from(Span::styled(
             &self.status_text,
             Style::default().fg(theme.orange),
