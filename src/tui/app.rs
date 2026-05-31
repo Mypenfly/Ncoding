@@ -1,7 +1,10 @@
 use std::io;
 
 use crossterm::{
-    event::{self, Event, KeyCode, KeyModifiers, KeyboardEnhancementFlags, PushKeyboardEnhancementFlags, PopKeyboardEnhancementFlags},
+    event::{
+        self, Event, KeyCode, KeyModifiers, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
+        PushKeyboardEnhancementFlags,
+    },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -209,8 +212,8 @@ impl App {
                             }
                             let total = self.last_draw_lines.get();
                             let vis = self.last_visible_h.get();
-                            self.scroll_offset = (self.scroll_offset + 1)
-                                .min(total.saturating_sub(1));
+                            self.scroll_offset =
+                                (self.scroll_offset + 1).min(total.saturating_sub(1));
                             if self.scroll_offset >= total.saturating_sub(vis) {
                                 self.auto_scroll = true;
                             }
@@ -230,8 +233,8 @@ impl App {
                             }
                             let total = self.last_draw_lines.get();
                             let vis = self.last_visible_h.get();
-                            self.scroll_offset = (self.scroll_offset + 10)
-                                .min(total.saturating_sub(1));
+                            self.scroll_offset =
+                                (self.scroll_offset + 10).min(total.saturating_sub(1));
                             if self.scroll_offset >= total.saturating_sub(vis) {
                                 self.auto_scroll = true;
                             }
@@ -254,11 +257,13 @@ impl App {
     }
 
     fn slash_reply(&mut self, text: String) {
-        self.session_mgr.add_message(Message {
-            role: Role::Info,
-            content: Some(text),
-            reasoning_content: None,
-        }).ok();
+        self.session_mgr
+            .add_message(Message {
+                role: Role::Info,
+                content: Some(text),
+                reasoning_content: None,
+            })
+            .ok();
     }
 
     fn msgs(&self) -> Vec<Message> {
@@ -447,7 +452,10 @@ impl App {
 
     fn continue_conversation(&mut self) {
         let msg_count = self.msgs().len();
-        info!("API request: sending {} messages to model {}", msg_count, self.config.api.model);
+        info!(
+            "API request: sending {} messages to model {}",
+            msg_count, self.config.api.model
+        );
 
         self.thinking_text.clear();
         self.content_text.clear();
@@ -619,10 +627,7 @@ impl App {
                     Ok(()) => {
                         self.update_status();
                         let msgs = self.msgs();
-                        let display_name = self
-                            .session_mgr
-                            .current_name()
-                            .unwrap_or(name);
+                        let display_name = self.session_mgr.current_name().unwrap_or(name);
                         self.push_msg(Message {
                             role: Role::Info,
                             content: Some(format!(
@@ -732,12 +737,15 @@ impl App {
         let theme = Theme::everforest();
         let area = f.area();
 
-        let input_vis = self.input_state.visual_lines(
-            area.width.saturating_sub(4) as usize
-        );
-        let input_h = (input_vis.len().max(1).max(
-            self.input_state.text.lines().count()
-        ).min(8) + 2) as u16;
+        let input_vis = self
+            .input_state
+            .visual_lines(area.width.saturating_sub(4) as usize);
+        let input_h = (input_vis
+            .len()
+            .max(1)
+            .max(self.input_state.text.lines().count())
+            .min(8)
+            + 2) as u16;
 
         let chunks = Layout::vertical([
             Constraint::Length(1),
@@ -770,7 +778,9 @@ impl App {
         };
         let state_style = match self.state {
             AppState::Working => Style::default().fg(theme.red).add_modifier(Modifier::BOLD),
-            AppState::Stop => Style::default().fg(theme.green).add_modifier(Modifier::BOLD),
+            AppState::Stop => Style::default()
+                .fg(theme.green)
+                .add_modifier(Modifier::BOLD),
         };
         let state_line = Line::from(Span::styled(
             state_label,
@@ -783,7 +793,10 @@ impl App {
             width: state_width.min(chunks[0].width),
             height: 1,
         };
-        f.render_widget(Paragraph::new(state_line).block(Block::default()), state_area);
+        f.render_widget(
+            Paragraph::new(state_line).block(Block::default()),
+            state_area,
+        );
 
         let text_area = chunks[1];
         let mut lines: Vec<Line> = Vec::new();
@@ -803,7 +816,9 @@ impl App {
                 }
                 Role::User => {
                     let text = msg.content.as_deref().unwrap_or("");
-                    if text.starts_with("【|Command/Tool|】") || text.starts_with("(你调用的命令执行结果如下)") {
+                    if text.starts_with("【|Command/Tool|】")
+                        || text.starts_with("(你调用的命令执行结果如下)")
+                    {
                         for line_str in text.lines() {
                             lines.push(Line::from(Span::styled(
                                 line_str,
@@ -880,7 +895,8 @@ impl App {
         let effective_offset = if self.auto_scroll {
             lines.len().saturating_sub(visible_h)
         } else {
-            self.scroll_offset.min(lines.len().saturating_sub(visible_h))
+            self.scroll_offset
+                .min(lines.len().saturating_sub(visible_h))
         };
 
         let visible_lines: Vec<Line> = lines.into_iter().skip(effective_offset).collect();
@@ -927,8 +943,8 @@ impl App {
             let input_w = input_area.width.saturating_sub(2) as usize;
             let (cursor_row, cursor_col) = self.input_state.cursor_visual_position(input_w);
             let cursor_x = input_area.x + 1 + cursor_col as u16;
-            let cursor_y = (input_area.y + 1 + cursor_row as u16)
-                .min(input_area.bottom().saturating_sub(2));
+            let cursor_y =
+                (input_area.y + 1 + cursor_row as u16).min(input_area.bottom().saturating_sub(2));
             f.set_cursor_position((cursor_x.min(input_area.right().saturating_sub(2)), cursor_y));
         }
 

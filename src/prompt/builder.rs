@@ -250,9 +250,56 @@ action: created
 
 ### Edit — 行匹配替换（必须先 read！）
 
-编辑前必须用 read 获取文件真实内容。使用 old_lines/new_lines 进行基于行的代码块匹配，系统自动忽略所有空格、缩进、空行差异进行字符匹配。
+编辑前必须用 read 获取文件真实内容。使用 old_lines/new_lines 进行基于行的连续匹配，系统自动忽略所有空格、缩进差异进行逐字符比较。old_lines 中每行严格对应文件中的连续行（不可跳过），除非使用 `...` 省略。
 
-**示例 1 — 用 ... 省略无关代码：**
+**示例 1 — 无 ... 连续替换：**
+《[FilesOperator]|Ncoder|》
+【mode】edit【mode】
+【path】src/lib.rs【path】
+【old_lines】
+fn old_name(x: i32) -> String {
+    return "old";
+}
+【old_lines】
+【new_lines】
+fn new_name(x: i32) -> String {
+    return "new";
+}
+【new_lines】
+《[End]|FilesOperator|》
+old_lines 有 3 行，new_lines 有 3 行 → 逐行替换，保留原文件缩进。
+
+**示例 2 — 增量（单行旧→多行新）：**
+《[FilesOperator]|Ncoder|》
+【mode】edit【mode】
+【path】src/main.py【path】
+【old_lines】
+old()
+【old_lines】
+【new_lines】
+new_a()
+    new_helper()
+new_b()
+【new_lines】
+《[End]|FilesOperator|》
+old 的 1 行被替换为 new 的 3 行。多出的行追加在匹配到的行后，首行缩进 = 原行缩进，后续行缩进 = 首行缩进 + (该行缩进 - 首个新增行缩进)。
+
+**示例 3 — 减量（多行旧→单行新）：**
+《[FilesOperator]|Ncoder|》
+【mode】edit【mode】
+【path】src/main.py【path】
+【old_lines】
+x()
+y()
+z()
+【old_lines】
+【new_lines】
+done()
+【new_lines】
+《[End]|FilesOperator|》
+old 的 3 行被替换为 new 的 1 行，多余行直接删除。
+
+**示例 4 — 用 ... 省略无关行：**
 《[FilesOperator]|Ncoder|》
 【mode】edit【mode】
 【path】src/main.py【path】
@@ -267,26 +314,14 @@ def multiply(a, b):
         return a * b
 【new_lines】
 《[End]|FilesOperator|》
-
-**示例 2 — 单行替换：**
-《[FilesOperator]|Ncoder|》
-【mode】edit【mode】
-【path】src/lib.rs【path】
-【old_lines】
-fn old_name(x: i32) -> String {
-【old_lines】
-【new_lines】
-fn new_name(x: i32) -> usize {
-【new_lines】
-《[End]|FilesOperator|》
+... 把 old_lines 分成首尾两个 segment，各 segment 内部连续匹配。中间不关心的行被保留原样。
 
 **关键规则：**
-- old_lines 的内容必须来自刚刚 read 的文件内容（字符一致），系统自动忽略空格和缩进差异
-- 使用 ... 省略不关心的行，减少输出 token，按函数等逻辑边界匹配更准确
+- old_lines 每行必须严格对应文件中连续的行（忽略空格缩进后字符一致）。文件中的额外行会导致匹配失败，请用 ... 跳过
+- old_lines 中空行也参与匹配（文件对应位置必须是空行或纯空白行）
+- 新行缩进自动保留原文件格式。新增行的缩进基于：原匹配区最后一行缩进 + (该行在 new_lines 中的缩进 - 第一个新增行在 new_lines 中的缩进)
 - 不要在 old_lines / new_lines 的首尾添加空行（系统会自动 trim）
-- new_lines 替换后自动保留原文件的缩进格式
-- 如果匹配失败，系统返回可能的行号供参考，此时增加更多相邻行作为上下文
-- 小范围精确编辑，不要全文件替换"#
+- 匹配失败时增加更多相邻行作为上下文；歧义时返回最佳候选代码"#
             .into()
     }
 

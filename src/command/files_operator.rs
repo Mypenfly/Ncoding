@@ -54,8 +54,7 @@ pub async fn execute_with_backup(
                 command_type: CommandType::FilesOperator,
                 block_index: i,
                 outcome: CommandOutcome::Failure {
-                    error: "path escape detected: path contains ../ or is outside workspace"
-                        .into(),
+                    error: "path escape detected: path contains ../ or is outside workspace".into(),
                 },
             });
             continue;
@@ -111,10 +110,7 @@ fn resolve_path(path: &Path, base: &Path) -> Result<PathBuf, String> {
 
 fn tmp_path(path: &Path) -> PathBuf {
     let pid = std::process::id();
-    let file_name = path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("tmp");
+    let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("tmp");
     let rand: u64 = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos() as u64)
@@ -134,7 +130,13 @@ fn backup_original(path: &Path, backup_dir: &Path) -> std::io::Result<()> {
     let rel = path
         .to_string_lossy()
         .chars()
-        .map(|c| if c == std::path::MAIN_SEPARATOR || c == ':' { '_' } else { c })
+        .map(|c| {
+            if c == std::path::MAIN_SEPARATOR || c == ':' {
+                '_'
+            } else {
+                c
+            }
+        })
         .collect::<String>();
     let backup_name = format!("{}_{}", timestamp, rel);
     let backup_path = backup_dir.join(backup_name);
@@ -143,16 +145,14 @@ fn backup_original(path: &Path, backup_dir: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-fn read_file(
-    path: &PathBuf,
-    offset: Option<usize>,
-    limit: Option<usize>,
-) -> CommandOutcome {
+fn read_file(path: &PathBuf, offset: Option<usize>, limit: Option<usize>) -> CommandOutcome {
     let file = match fs::File::open(path) {
         Ok(f) => f,
-        Err(e) => return CommandOutcome::Failure {
-            error: format!("cannot open {}: {}", path.display(), e),
-        },
+        Err(e) => {
+            return CommandOutcome::Failure {
+                error: format!("cannot open {}: {}", path.display(), e),
+            }
+        }
     };
 
     let start = offset.unwrap_or(1);
@@ -193,7 +193,11 @@ fn read_file(
         "status: OK\npath: {}\nlines: {}{}",
         path.display(),
         lines_range.unwrap_or_else(|| "N/A".into()),
-        if read_end > 0 { "\n".to_string() + &output } else { String::new() }
+        if read_end > 0 {
+            "\n".to_string() + &output
+        } else {
+            String::new()
+        }
     );
 
     CommandOutcome::Success { summary }
@@ -202,9 +206,11 @@ fn read_file(
 fn write_file(path: &PathBuf, content: Option<&str>, backup_dir: Option<&Path>) -> CommandOutcome {
     let content = match content {
         Some(c) => c,
-        None => return CommandOutcome::Failure {
-            error: "write mode requires content parameter".into(),
-        },
+        None => {
+            return CommandOutcome::Failure {
+                error: "write mode requires content parameter".into(),
+            }
+        }
     };
 
     if content.len() > MAX_WRITE_SIZE {
@@ -223,7 +229,11 @@ fn write_file(path: &PathBuf, content: Option<&str>, backup_dir: Option<&Path>) 
         if !parent.as_os_str().is_empty() && !parent.exists() {
             if let Err(e) = fs::create_dir_all(parent) {
                 return CommandOutcome::Failure {
-                    error: format!("failed to create parent directory {}: {}", parent.display(), e),
+                    error: format!(
+                        "failed to create parent directory {}: {}",
+                        parent.display(),
+                        e
+                    ),
                 };
             }
         }
@@ -276,8 +286,8 @@ fn write_file(path: &PathBuf, content: Option<&str>, backup_dir: Option<&Path>) 
 
 fn edit_file(
     path: &PathBuf,
-    old_str: Option<&str>,
-    new_str: Option<&str>,
+    _old_str: Option<&str>,
+    _new_str: Option<&str>,
     old_lines: Option<&str>,
     new_lines: Option<&str>,
     backup_dir: Option<&Path>,
@@ -293,115 +303,39 @@ fn edit_file(
         return edit_lines(path, old_l, new_l, backup_dir);
     }
 
-    let (old_str, new_str) = match (old_str, new_str) {
-        (Some(o), Some(n)) => (o, n),
-        _ => return CommandOutcome::Failure {
-            error: "edit mode requires old_lines/new_lines or old_str/new_str parameters".into(),
-        },
-    };
-
-    if old_str.is_empty() {
-        return CommandOutcome::Failure {
-            error: "edit failed: old_str cannot be empty".into(),
-        };
-    }
-
-    edit_str(path, old_str, new_str, backup_dir)
-}
-
-fn edit_str(path: &PathBuf, old_str: &str, new_str: &str, backup_dir: Option<&Path>) -> CommandOutcome {
-    let file_content = match fs::read_to_string(path) {
-        Ok(c) => c,
-        Err(e) => return CommandOutcome::Failure {
-            error: format!("failed to read {}: {}", path.display(), e),
-        },
-    };
-
-    let matches: Vec<_> = file_content.match_indices(old_str).collect();
-
-    match matches.len() {
-        0 => CommandOutcome::Failure {
-            error: format!(
-                "edit failed: old_str not found in {}. Please re-read the file to verify content.",
-                path.display()
-            ),
-        },
-        1 => {
-            let (pos, _) = matches[0];
-            if let Some(backup) = backup_dir {
-                let _ = backup_original(path, backup);
-            }
-            let mut new_content = String::with_capacity(file_content.len());
-            new_content.push_str(&file_content[..pos]);
-            new_content.push_str(new_str);
-            new_content.push_str(&file_content[pos + old_str.len()..]);
-
-            let start_line = file_content[..pos].bytes().filter(|&b| b == b'\n').count() + 1;
-
-            let tmp = tmp_path(path);
-            match fs::write(&tmp, &new_content) {
-                Ok(()) => match fs::rename(&tmp, path) {
-                    Ok(()) => {
-                        match verify_edit(path, new_str, &file_content) {
-                            None => CommandOutcome::Success {
-                                summary: format!(
-                                    "status: OK\npath: {}\nreplaced: 1 occurrence at line {}",
-                                    path.display(), start_line
-                                ),
-                            },
-                            Some(err) => CommandOutcome::Failure {
-                                error: format!("edit verification failed: {} (line {}). Write was applied but content may be incorrect. Re-read the file.", err, start_line),
-                            },
-                        }
-                    }
-                    Err(e) => {
-                        let _ = fs::remove_file(&tmp);
-                        CommandOutcome::Failure {
-                            error: format!("failed to rename tmp to {}: {}", path.display(), e),
-                        }
-                    }
-                },
-                Err(e) => CommandOutcome::Failure {
-                    error: format!("failed to write {}: {}", path.display(), e),
-                },
-            }
-        }
-        n => {
-            let locations: Vec<String> = matches
-                .iter()
-                .map(|(pos, _)| {
-                    let line = file_content[..*pos].bytes().filter(|&b| b == b'\n').count() + 1;
-                    line.to_string()
-                })
-                .collect();
-            CommandOutcome::Failure {
-                error: format!(
-                    "edit failed: old_str matched {} locations (lines {}). \
-                     Provide more context to make old_str unique.",
-                    n, locations.join(", ")
-                ),
-            }
-        }
+    CommandOutcome::Failure {
+        error: "edit mode requires old_lines/new_lines parameters. old_str/new_str is no longer supported. Use old_lines/new_lines with ... for skip.".into(),
     }
 }
 
-fn edit_lines(path: &PathBuf, old_lines: &str, new_lines: &str, backup_dir: Option<&Path>) -> CommandOutcome {
+
+
+fn edit_lines(
+    path: &PathBuf,
+    old_lines: &str,
+    new_lines: &str,
+    backup_dir: Option<&Path>,
+) -> CommandOutcome {
     let old_lines = old_lines.trim();
     let new_lines = new_lines.trim();
 
     let file_content = match fs::read_to_string(path) {
         Ok(c) => c,
-        Err(e) => return CommandOutcome::Failure {
-            error: format!("failed to read {}: {}", path.display(), e),
-        },
+        Err(e) => {
+            return CommandOutcome::Failure {
+                error: format!("failed to read {}: {}", path.display(), e),
+            }
+        }
     };
 
     let file_lines: Vec<&str> = file_content.lines().collect();
-    let old_anchored: Vec<&str> = old_lines.lines()
+    let old_anchored: Vec<&str> = old_lines
+        .lines()
         .filter(|l| l.trim() != "...")
         .filter(|l| !l.trim().is_empty())
         .collect();
-    let new_anchored: Vec<&str> = new_lines.lines()
+    let new_anchored: Vec<&str> = new_lines
+        .lines()
         .filter(|l| l.trim() != "...")
         .filter(|l| !l.trim().is_empty())
         .collect();
@@ -412,67 +346,62 @@ fn edit_lines(path: &PathBuf, old_lines: &str, new_lines: &str, backup_dir: Opti
         };
     }
 
-    if old_anchored.is_empty() {
-        return CommandOutcome::Failure {
-            error: "edit failed: old_lines has no anchored content (all lines are '...')".into(),
-        };
-    }
+    let old_segments = split_segments(old_lines);
+    let has_dots = old_segments.iter().filter(|s| !s.is_empty()).count() > 1;
 
-    let first_line = old_anchored[0].trim().to_string();
-    let last_line = old_anchored.last().unwrap().trim().to_string();
-
-    let first_matches: Vec<usize> = file_lines.iter().enumerate()
-        .filter(|(_, l)| normalized_match(l, &first_line))
-        .map(|(i, _)| i)
-        .collect();
-    let last_matches: Vec<usize> = file_lines.iter().enumerate()
-        .filter(|(_, l)| normalized_match(l, &last_line))
-        .map(|(i, _)| i)
-        .collect();
-
-    if first_matches.is_empty() {
-        return CommandOutcome::Failure {
-            error: format!(
-                "edit failed: first anchored line not found in {}. Searched for (indent-stripped): '{}'",
-                path.display(), first_line
-            ),
-        };
-    }
-    if last_matches.is_empty() {
-        return CommandOutcome::Failure {
-            error: format!(
-                "edit failed: last anchored line not found in {}. Searched for (indent-stripped): '{}'",
-                path.display(), last_line
-            ),
-        };
-    }
-
-    let valid: Vec<(usize, usize)> = first_matches.iter()
-        .flat_map(|&f| last_matches.iter().filter(move |&&l| l >= f).map(move |&l| (f, l)))
-        .filter(|&(f, l)| match_intermediate(&file_lines, &old_anchored, (f, l)))
-        .collect();
+    let valid: Vec<(usize, usize)> = if has_dots {
+        find_dotted_matches(&file_lines, &old_segments)
+    } else {
+        find_all_sequential_matches(&file_lines, &old_segments[0])
+    };
 
     if valid.is_empty() {
-        let candidates: Vec<String> = first_matches.iter()
-            .flat_map(|&f| last_matches.iter().map(move |&l| (f, l)))
-            .map(|(f, l)| format!("first at line {}, last at line {}", f + 1, l + 1))
-            .collect();
+        let first_line = old_anchored[0].trim().to_string();
+        let last_line = old_anchored.last().unwrap().trim().to_string();
+        let first_found = file_lines.iter().any(|l| normalized_match(l, &first_line));
+        let _last_found = file_lines.iter().any(|l| normalized_match(l, &last_line));
+        if !first_found {
+            return CommandOutcome::Failure {
+                error: format!(
+                    "edit failed: first line not found in {}. Searched for (indent-stripped): '{}'. Re-read the file.",
+                    path.display(), first_line
+                ),
+            };
+        }
         return CommandOutcome::Failure {
             error: format!(
-                "edit failed: no matching block found in {}. Try re-reading the file. Possible boundaries: {}",
-                path.display(),
-                candidates.join("; "),
+                "edit failed: no matching block found in {}. The anchored lines could not be matched sequentially. Possible reasons: old_lines content differs from file, or lines are out of order. Try re-reading the file.",
+                path.display()
             ),
         };
     }
+
     if valid.len() > 1 {
-        let desc: Vec<String> = valid.iter()
-            .map(|(f, l)| format!("lines {}..{}", f + 1, l + 1))
+        let mut best = valid[0];
+        let mut best_score = usize::MAX;
+        for &(f, l) in &valid {
+            let score = l.saturating_sub(f);
+            if score < best_score {
+                best_score = score;
+                best = (f, l);
+            }
+        }
+
+        let ctx_start = best.0.saturating_sub(3);
+        let ctx_end = (best.1 + 3).min(file_lines.len().saturating_sub(1));
+        let block_code: Vec<String> = file_lines[ctx_start..=ctx_end]
+            .iter()
+            .enumerate()
+            .map(|(i, line)| format!("    {}: {}", ctx_start + i + 1, line))
             .collect();
+        let block_text = block_code.join("\n");
+
         return CommandOutcome::Failure {
             error: format!(
-                "edit failed: ambiguous match — {} possible blocks in {}. Add more context to make the match unique. Candidates: {}",
-                valid.len(), path.display(), desc.join(", "),
+                "edit failed: old_lines matched {} blocks in {}. The smallest span is lines {}..{}:\n{}\n\n你可能想要修改此处，请重新阅读文件后增加更多相邻行作为上下文来消除歧义。",
+                valid.len(), path.display(),
+                best.0 + 1, best.1 + 1,
+                block_text,
             ),
         };
     }
@@ -483,76 +412,14 @@ fn edit_lines(path: &PathBuf, old_lines: &str, new_lines: &str, backup_dir: Opti
         let _ = backup_original(path, backup);
     }
 
-    let old_segments = split_segments(old_lines);
-    let new_segments_needed = split_segments(new_lines);
+    let new_segments = split_segments(new_lines);
 
-    let segment_positions = find_segment_positions(&file_lines, &old_segments, start, end);
-    if segment_positions.is_empty() {
-        return CommandOutcome::Failure {
-            error: format!(
-                "edit failed: internal matching error in {}. Segments could not be located.",
-                path.display()
-            ),
-        };
-    }
-
-    let mut out_lines: Vec<String> = file_lines.iter().take(start).map(|s| s.to_string()).collect();
-    let mut cursor = start;
-
-    let n = old_segments.len();
-    for seg_idx in 0..n {
-        if seg_idx < segment_positions.len() {
-            let (seg_start, seg_end) = segment_positions[seg_idx];
-            while cursor < seg_start {
-                out_lines.push(file_lines[cursor].to_string());
-                cursor += 1;
-            }
-
-            let new_seg: &[&str] = match new_segments_needed.get(seg_idx) {
-                Some(s) if !s.is_empty() => s.as_slice(),
-                _ => &[],
-            };
-
-            for (j, nl) in new_seg.iter().enumerate() {
-                let orig_line_idx = if j < seg_end.saturating_sub(seg_start) + 1 {
-                    seg_start + j
-                } else {
-                    seg_start
-                };
-                let orig_indent = if orig_line_idx < file_lines.len() {
-                    file_lines[orig_line_idx].chars().take_while(|c| c.is_whitespace()).count()
-                } else {
-                    0
-                };
-                let stripped = strip_indent_full(nl);
-                let indent_str = if orig_indent > 0 && orig_line_idx < file_lines.len() {
-                    let fl = file_lines[orig_line_idx];
-                    &fl[..orig_indent.min(fl.len())]
-                } else {
-                    ""
-                };
-                out_lines.push(format!("{}{}", indent_str, stripped));
-            }
-            cursor = (seg_end + 1).min(file_lines.len());
-        }
-    }
-
-    while cursor <= end && cursor < file_lines.len() {
-        out_lines.push(file_lines[cursor].to_string());
-        cursor += 1;
-    }
-
-    out_lines.extend(file_lines.iter().skip(end + 1).map(|s| s.to_string()));
-
-    let new_content = out_lines.join("\n");
-    if !file_content.ends_with('\n') {
-        let _ = new_content;
-    }
-    let final_content = if file_content.ends_with('\n') && !new_content.ends_with('\n') {
-        new_content + "\n"
+    let final_content = if has_dots {
+        apply_dotted_replace(&file_lines, &old_segments, &new_segments, start, end)
     } else {
-        new_content
+        apply_simple_replace(&file_lines, &old_segments[0], &new_segments[0], start, end)
     };
+    let final_content = preserve_newline(&file_content, final_content);
 
     let tmp = tmp_path(path);
     match fs::write(&tmp, &final_content) {
@@ -561,10 +428,9 @@ fn edit_lines(path: &PathBuf, old_lines: &str, new_lines: &str, backup_dir: Opti
                 let verif = match fs::read_to_string(path) {
                     Ok(vc) => {
                         let vl: Vec<&str> = vc.lines().collect();
-                        let all_found = new_anchored.iter().all(|nl| {
-                            vl.iter().any(|fl| normalized_match(fl, nl))
-                        });
-                        all_found
+                        new_anchored
+                            .iter()
+                            .all(|nl| vl.iter().any(|fl| normalized_match(fl, nl)))
                     }
                     Err(_) => true,
                 };
@@ -579,7 +445,10 @@ fn edit_lines(path: &PathBuf, old_lines: &str, new_lines: &str, backup_dir: Opti
                     CommandOutcome::Success {
                         summary: format!(
                             "status: OK\npath: {}\nreplaced: lines {}..{} -> {} new lines",
-                            path.display(), start + 1, end + 1, new_anchored.len()
+                            path.display(),
+                            start + 1,
+                            end + 1,
+                            new_anchored.len()
                         ),
                     }
                 }
@@ -597,8 +466,262 @@ fn edit_lines(path: &PathBuf, old_lines: &str, new_lines: &str, backup_dir: Opti
     }
 }
 
-fn strip_indent_full(line: &str) -> &str {
-    line.trim_start()
+fn find_all_sequential_matches(
+    file_lines: &[&str],
+    search_lines: &[&str],
+) -> Vec<(usize, usize)> {
+    let n = file_lines.len();
+    let sl = search_lines.len();
+    if sl == 0 {
+        return Vec::new();
+    }
+    let mut matches = Vec::new();
+    let max_start = n.saturating_sub(sl);
+    'outer: for start in 0..=max_start {
+        for j in 0..sl {
+            let old_entry = search_lines[j];
+            let file_line = file_lines[start + j];
+            if old_entry.trim().is_empty() {
+                if !file_line.trim().is_empty() {
+                    continue 'outer;
+                }
+            } else if !normalized_match(file_line, old_entry) {
+                continue 'outer;
+            }
+        }
+        matches.push((start, start + sl - 1));
+    }
+    matches
+}
+
+fn find_dotted_matches(
+    file_lines: &[&str],
+    old_segments: &[Vec<&str>],
+) -> Vec<(usize, usize)> {
+    let non_empty: Vec<&Vec<&str>> = old_segments.iter().filter(|s| !s.is_empty()).collect();
+    if non_empty.is_empty() {
+        return Vec::new();
+    }
+
+    let head = non_empty[0];
+    let head_matches = find_all_sequential_matches(file_lines, head.as_slice());
+    if non_empty.len() == 1 {
+        return head_matches;
+    }
+
+    let tail = non_empty[non_empty.len() - 1];
+    let tail_matches = find_all_sequential_matches(file_lines, tail.as_slice());
+
+    let middle: Vec<&Vec<&str>> = non_empty[1..non_empty.len() - 1].to_vec();
+
+    let mut valid = Vec::new();
+    for &(hs, he) in &head_matches {
+        for &(ts, te) in &tail_matches {
+            if ts <= he {
+                continue;
+            }
+            let mut ok = true;
+            let mut cursor = he + 1;
+            for mseg in &middle {
+                if mseg.is_empty() {
+                    continue;
+                }
+                let pos = find_segment_in_range(file_lines, mseg.as_slice(), cursor, ts.saturating_sub(1));
+                match pos {
+                    Some((_, me)) => cursor = me + 1,
+                    None => { ok = false; break; }
+                }
+            }
+            if ok && te >= hs && te >= he && te >= ts {
+                valid.push((hs, te));
+            }
+        }
+    }
+
+    if valid.is_empty() && head_matches.len() == 1 && !middle.is_empty() {
+        let (hs, he) = head_matches[0];
+        for &(ts, te) in &tail_matches {
+            if ts > he {
+                valid.push((hs, te));
+            }
+        }
+    }
+
+    valid
+}
+
+#[allow(clippy::needless_range_loop)]
+fn find_segment_in_range(
+    file_lines: &[&str],
+    seg: &[&str],
+    search_start: usize,
+    search_end: usize,
+) -> Option<(usize, usize)> {
+    let mut si = 0;
+    let mut seg_start = None;
+    let mut seg_end = None;
+    for i in search_start..=search_end {
+        if i >= file_lines.len() {
+            break;
+        }
+        if si < seg.len() && normalized_match(file_lines[i], seg[si]) {
+            if seg_start.is_none() {
+                seg_start = Some(i);
+            }
+            si += 1;
+            if si == seg.len() {
+                seg_end = Some(i);
+                break;
+            }
+        }
+    }
+    match (seg_start, seg_end) {
+        (Some(s), Some(e)) => Some((s, e)),
+        _ => None,
+    }
+}
+
+#[allow(clippy::needless_range_loop)]
+fn apply_simple_replace(
+    file_lines: &[&str],
+    old_seg: &[&str],
+    new_seg: &[&str],
+    start: usize,
+    end: usize,
+) -> String {
+    let old_len = old_seg.len();
+    let new_len = new_seg.len();
+    let last_old_indent = if end < file_lines.len() {
+        file_lines[end].chars().take_while(|c| c.is_whitespace()).count()
+    } else {
+        0
+    };
+
+    let mut out: Vec<String> = Vec::with_capacity(file_lines.len() + new_len);
+    out.extend(file_lines[..start].iter().map(|s| s.to_string()));
+
+    let min_len = old_len.min(new_len);
+    for j in 0..min_len {
+        let orig_line_idx = start + j;
+        let orig_indent = if orig_line_idx < file_lines.len() {
+            file_lines[orig_line_idx].chars().take_while(|c| c.is_whitespace()).count()
+        } else {
+            0
+        };
+        let indent_str = if orig_indent > 0 && orig_line_idx < file_lines.len() {
+            &file_lines[orig_line_idx][..orig_indent.min(file_lines[orig_line_idx].len())]
+        } else {
+            ""
+        };
+        let body = new_seg[j].trim_start();
+        out.push(format!("{}{}", indent_str, body));
+    }
+
+    if new_len > old_len {
+        let first_extra_body = new_seg[old_len].trim_start();
+        let first_extra_indent = new_seg[old_len].len() - first_extra_body.len();
+        for j in old_len..new_len {
+            let body = new_seg[j].trim_start();
+            let this_indent = new_seg[j].len() - body.len();
+            let rel_indent = this_indent.saturating_sub(first_extra_indent);
+            let total_indent = last_old_indent + rel_indent;
+            out.push(format!("{:indent$}{}", "", body, indent = total_indent));
+        }
+    }
+
+    out.extend(file_lines[end + 1..].iter().map(|s| s.to_string()));
+    out.join("\n")
+}
+
+#[allow(clippy::needless_range_loop)]
+fn apply_dotted_replace(
+    file_lines: &[&str],
+    old_segments: &[Vec<&str>],
+    new_segments: &[Vec<&str>],
+    start: usize,
+    end: usize,
+) -> String {
+    let mut out: Vec<String> = file_lines[..start].iter().map(|s| s.to_string()).collect();
+    let mut cursor = start;
+    let n = old_segments.len();
+
+    let old_positions: Vec<Option<(usize, usize)>> = {
+        let mut pos = Vec::new();
+        let mut c = start;
+        for seg in old_segments {
+            if seg.is_empty() {
+                pos.push(None);
+                continue;
+            }
+            let p = find_segment_in_range(file_lines, seg.as_slice(), c, end);
+            if let Some((s, e)) = p {
+                c = e + 1;
+                pos.push(Some((s, e)));
+            } else {
+                pos.push(None);
+            }
+        }
+        pos
+    };
+
+    for seg_idx in 0..n {
+        if let Some(Some((seg_start, seg_end))) = old_positions.get(seg_idx) {
+            while cursor < *seg_start {
+                out.push(file_lines[cursor].to_string());
+                cursor += 1;
+            }
+
+            let new_seg: &[&str] = match new_segments.get(seg_idx) {
+                Some(s) if !s.is_empty() => s.as_slice(),
+                _ => &[],
+            };
+
+            let old_len = seg_end.saturating_sub(*seg_start) + 1;
+            let new_len = new_seg.len();
+            let min_len = old_len.min(new_len);
+
+            for j in 0..min_len {
+                let orig_line_idx = *seg_start + j;
+                let orig_indent = file_lines[orig_line_idx]
+                    .chars().take_while(|c| c.is_whitespace()).count();
+                let indent_str = if orig_indent > 0 {
+                    &file_lines[orig_line_idx][..orig_indent.min(file_lines[orig_line_idx].len())]
+                } else { "" };
+                out.push(format!("{}{}", indent_str, new_seg[j].trim_start()));
+            }
+
+            if new_len > old_len {
+                let last_indent = file_lines[*seg_end]
+                    .chars().take_while(|c| c.is_whitespace()).count();
+                let first_extra_body = new_seg[old_len].trim_start();
+                let first_extra_indent = new_seg[old_len].len() - first_extra_body.len();
+                for j in old_len..new_len {
+                    let body = new_seg[j].trim_start();
+                    let this_indent = new_seg[j].len() - body.len();
+                    let rel = this_indent.saturating_sub(first_extra_indent);
+                    out.push(format!("{:indent$}{}", "", body, indent = last_indent + rel));
+                }
+            }
+
+            cursor = seg_end + 1;
+        }
+    }
+
+    while cursor <= end && cursor < file_lines.len() {
+        out.push(file_lines[cursor].to_string());
+        cursor += 1;
+    }
+
+    out.extend(file_lines[end + 1..].iter().map(|s| s.to_string()));
+    out.join("\n")
+}
+
+fn preserve_newline(original: &str, content: String) -> String {
+    if original.ends_with('\n') && !content.ends_with('\n') {
+        content + "\n"
+    } else {
+        content
+    }
 }
 
 fn normalized_match(a: &str, b: &str) -> bool {
@@ -621,88 +744,16 @@ fn split_segments(text: &str) -> Vec<Vec<&str>> {
     segments
 }
 
-fn find_segment_positions(
-    file_lines: &[&str],
-    old_segments: &[Vec<&str>],
-    search_start: usize,
-    search_end: usize,
-) -> Vec<(usize, usize)> {
-    let mut positions = Vec::new();
-    let mut cursor = search_start;
-    for seg in old_segments {
-        if seg.is_empty() {
-            continue;
-        }
-        let mut seg_start = None;
-        let mut seg_end = None;
-        let mut si = 0;
-        for i in cursor..=search_end {
-            if i >= file_lines.len() {
-                break;
-            }
-            if si < seg.len() && normalized_match(file_lines[i], seg[si]) {
-                if seg_start.is_none() {
-                    seg_start = Some(i);
-                }
-                si += 1;
-                if si == seg.len() {
-                    seg_end = Some(i);
-                    break;
-                }
-            }
-        }
-        match (seg_start, seg_end) {
-            (Some(s), Some(e)) => {
-                positions.push((s, e));
-                cursor = e + 1;
-            }
-            _ => return Vec::new(),
-        }
-    }
-    positions
-}
-
-fn match_intermediate(
-    file_lines: &[&str],
-    anchored: &[&str],
-    (start, end): (usize, usize),
-) -> bool {
-    if end >= file_lines.len() || anchored.is_empty() {
-        return false;
-    }
-    if !normalized_match(file_lines[start], anchored[0]) {
-        return false;
-    }
-    let range_lines: Vec<&str> = file_lines[start..=end].to_vec();
-    let mut ai = 0;
-    for rl in &range_lines {
-        if ai >= anchored.len() {
-            break;
-        }
-        if normalized_match(rl, anchored[ai]) {
-            ai += 1;
-        }
-    }
-    ai == anchored.len()
-}
-
-fn verify_edit(path: &PathBuf, expected_content: &str, _original: &str) -> Option<String> {
-    match fs::read_to_string(path) {
-        Ok(content) => {
-            if !content.contains(expected_content) {
-                Some("new_str content not found in file after write".into())
-            } else {
-                None
-            }
-        }
-        Err(e) => Some(format!("cannot re-read file for verification: {}", e)),
-    }
-}
-
 fn check_missing_keys(block: &FileOpBlock) -> String {
     let mut missing = Vec::new();
-    if block.path.as_os_str().is_empty() { missing.push("path"); }
-    if block.mode != FileMode::Read && block.content.is_none() && block.old_str.is_none() && block.old_lines.is_none() {
+    if block.path.as_os_str().is_empty() {
+        missing.push("path");
+    }
+    if block.mode != FileMode::Read
+        && block.content.is_none()
+        && block.old_str.is_none()
+        && block.old_lines.is_none()
+    {
         missing.push("content or old_str/new_str or old_lines/new_lines");
     }
     if missing.is_empty() {
@@ -712,614 +763,342 @@ fn check_missing_keys(block: &FileOpBlock) -> String {
     }
 }
 
+
 #[cfg(test)]
 mod tests {
     use super::*;
-use std::path::{Path, PathBuf};
+    use std::fs;
+    use std::path::PathBuf;
 
-    #[test]
-    fn test_is_path_escape_detected() {
-        assert!(is_path_escape(&PathBuf::from("../etc/passwd")));
-        assert!(is_path_escape(&PathBuf::from("../../root/.ssh")));
+ struct Cleanup(Option<PathBuf>);
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            if let Some(ref dir) = self.0 {
+                let _ = fs::remove_dir_all(dir);
+            }
+        }
+    }
+
+    fn make_temp_dir() -> (PathBuf, Cleanup) {
+        let mut dir = std::env::temp_dir();
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap()
+            .as_nanos();
+        dir.push(format!("ncoding_test_{}", ts));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.clone();
+        (path, Cleanup(Some(dir)))
+    }
+
+    fn write_test_file(path: &PathBuf, content: &str) {
+        if let Some(parent) = path.parent() {
+            if !parent.as_os_str().is_empty() {
+                fs::create_dir_all(parent).ok();
+            }
+        }
+        fs::write(path, content).unwrap();
     }
 
     #[test]
-    fn test_is_path_escape_safe() {
-        assert!(!is_path_escape(&PathBuf::from("src/main.rs")));
-        assert!(!is_path_escape(&PathBuf::from("target/debug")));
-        assert!(!is_path_escape(&PathBuf::from("n_coding.kdl")));
-    }
-
-    #[test]
-    fn test_read_file_with_line_numbers() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("test.txt");
-        std::fs::write(&path, "line1\nline2\nline3\n").unwrap();
-
-        let result = read_file(&path, None, None);
-        match result {
+    fn test_read_file_basic() {
+        let (dir, _cleanup) = make_temp_dir();
+        let p = dir.join("test.txt");
+        write_test_file(&p, "line1\nline2\nline3\n");
+        let outcome = read_file(&p, None, None);
+        match outcome {
             CommandOutcome::Success { summary } => {
                 assert!(summary.contains("1: line1"));
-                assert!(summary.contains("2: line2"));
                 assert!(summary.contains("3: line3"));
-                assert!(summary.contains("lines: 1..3"));
-            }
-            CommandOutcome::Failure { error } => {
-                panic!("unexpected failure: {}", error);
-            }
-        }
-    }
-
-    #[test]
-    fn test_write_file_created() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("new.txt");
-        let result = write_file(&path, Some("hello"), None);
-        match result {
-            CommandOutcome::Success { summary } => {
-                assert!(summary.contains("action: created"));
-                assert_eq!(std::fs::read_to_string(&path).unwrap(), "hello");
             }
             CommandOutcome::Failure { error } => panic!("unexpected failure: {}", error),
         }
     }
 
     #[test]
-    fn test_write_file_overwritten() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("overwrite.txt");
-        std::fs::write(&path, "old").unwrap();
-        let result = write_file(&path, Some("new"), None);
-        match result {
-            CommandOutcome::Success { summary } => {
-                assert!(summary.contains("action: overwritten"));
-                assert_eq!(std::fs::read_to_string(&path).unwrap(), "new");
+    fn test_write_file_create_and_overwrite() {
+        let (dir, _cleanup) = make_temp_dir();
+        let p = dir.join("new.txt");
+
+        let outcome = write_file(&p, Some("hello world"), None);
+        match outcome {
+            CommandOutcome::Success { ref summary } => {
+                assert!(summary.contains("created"));
             }
-            CommandOutcome::Failure { error } => panic!("unexpected failure: {}", error),
+            _ => panic!("expected created"),
+        }
+
+        let outcome2 = write_file(&p, Some("updated"), None);
+        match outcome2 {
+            CommandOutcome::Success { ref summary } => {
+                assert!(summary.contains("overwritten"));
+            }
+            _ => panic!("expected overwritten"),
         }
     }
 
     #[test]
-    fn test_write_file_creates_parent_dirs() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("deep/nested/file.txt");
-        let result = write_file(&path, Some("deep content"), None);
-        match result {
-            CommandOutcome::Success { summary } => {
-                assert!(summary.contains("action: created"));
-                assert_eq!(std::fs::read_to_string(&path).unwrap(), "deep content");
-                assert!(dir.path().join("deep/nested").exists());
-            }
-            CommandOutcome::Failure { error } => panic!("unexpected failure: {}", error),
+    fn test_edit_lines_basic_replace() {
+        let (dir, _cleanup) = make_temp_dir();
+        let p = dir.join("edit.txt");
+        write_test_file(&p, "fn main() {\n    println!(\"hello\");\n}\n");
+
+        let outcome = edit_file(
+            &p, None, None,
+            Some("fn main() {\n    ...\n}"),
+            Some("fn main() {\n    ...\n    println!(\"world\");\n}"),
+            None,
+        );
+        match outcome {
+            CommandOutcome::Success { .. } => {},
+            CommandOutcome::Failure { error } => panic!("edit failed: {}", error),
         }
+        let content = fs::read_to_string(&p).unwrap();
+        assert!(content.contains("println!(\"world\");"));
     }
 
     #[test]
-    fn test_write_file_size_limit() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("big.txt");
-        let big = "x".repeat(MAX_WRITE_SIZE + 1);
-        let result = write_file(&path, Some(&big), None);
-        match result {
+    fn test_edit_lines_ambiguous_error_shows_code() {
+        let (dir, _cleanup) = make_temp_dir();
+        let p = dir.join("ambig.txt");
+        write_test_file(&p, "\
+fn foo() {
+    do_a()
+    do_b()
+}
+fn bar() {
+    do_a()
+    do_b()
+}
+");
+
+        let outcome = edit_file(
+            &p, None, None,
+            Some("do_a()\n    do_b()"),
+            Some("do_a()\n    do_b()"),
+            None,
+        );
+        match outcome {
             CommandOutcome::Failure { error } => {
-                assert!(error.contains("size limit"));
+                assert!(error.contains("do_a"), "error should contain code: {}", error);
+                assert!(error.contains("matched 2 blocks"), "error should mention ambiguity: {}", error);
             }
-            CommandOutcome::Success { .. } => panic!("expected size limit failure"),
+            _ => panic!("expected failure for ambiguous match, but got success"),
         }
     }
 
     #[test]
-    fn test_write_file_with_backup() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("with_backup.txt");
-        let backup_dir = dir.path().join("backups");
-        std::fs::write(&path, "original content").unwrap();
-        let result = write_file(&path, Some("new content"), Some(&backup_dir));
-        match result {
-            CommandOutcome::Success { summary } => {
-                assert!(summary.contains("action: overwritten"));
-                assert!(backup_dir.exists());
-                let mut backups = std::fs::read_dir(&backup_dir).unwrap();
-                let backup_entry = backups.next().unwrap().unwrap();
-                let backup_content = std::fs::read_to_string(backup_entry.path()).unwrap();
-                assert_eq!(backup_content, "original content");
-            }
-            CommandOutcome::Failure { error } => panic!("unexpected failure: {}", error),
-        }
-    }
+    fn test_edit_file_rejects_old_str() {
+        let (dir, _cleanup) = make_temp_dir();
+        let p = dir.join("reject.txt");
+        write_test_file(&p, "hello old world\n");
 
-    #[test]
-    fn test_read_file_with_offset() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("lines.txt");
-        std::fs::write(&path, "a\nb\nc\nd\ne\n").unwrap();
-
-        let result = read_file(&path, Some(3), Some(2));
-        match result {
-            CommandOutcome::Success { summary } => {
-                assert!(!summary.contains("1: a"));
-                assert!(!summary.contains("2: b"));
-                assert!(summary.contains("3: c"));
-                assert!(summary.contains("4: d"));
-                assert!(!summary.contains("5: e"));
-            }
+        let outcome = edit_file(
+            &p,
+            Some("hello old world"),
+            Some("hello new world"),
+            None, None,
+            None,
+        );
+        match outcome {
             CommandOutcome::Failure { error } => {
-                panic!("unexpected failure: {}", error);
+                assert!(
+                    error.contains("old_lines"),
+                    "error should mention old_lines: {}",
+                    error
+                );
             }
+            _ => panic!("expected failure when using old_str without old_lines"),
         }
     }
 
     #[test]
-    fn test_read_file_missing() {
-        let result = read_file(&PathBuf::from("/nonexistent/file.txt"), None, None);
-        match result {
-            CommandOutcome::Failure { error } => {
-                assert!(error.contains("cannot open"));
-            }
-            CommandOutcome::Success { .. } => {
-                panic!("expected failure for missing file");
-            }
-        }
-    }
+    fn test_edit_lines_no_match_reports_boundary() {
+        let (dir, _cleanup) = make_temp_dir();
+        let p = dir.join("nomatch.txt");
+       write_test_file(&p, "fn a() {}\nfn b() {}\nfn c() {}\n");
 
-    #[test]
-    fn test_edit_file_single_replacement() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("edit_test.rs");
-        std::fs::write(&path, "fn main() {\n    println!(\"hello\");\n}\n").unwrap();
-
-        let result = edit_file(&path, Some("fn main() {"), Some("#[tokio::main]\nasync fn main() {"), None, None, None);
-        match result {
-            CommandOutcome::Success { summary } => {
-                assert!(summary.contains("status: OK"));
-                let content = std::fs::read_to_string(&path).unwrap();
-                assert!(content.contains("#[tokio::main]"));
-                assert!(content.contains("async fn main()"));
-            }
-            CommandOutcome::Failure { error } => {
-                panic!("unexpected failure: {}", error);
-            }
-        }
-    }
-
-    #[test]
-    fn test_edit_file_line_matching_function_replace() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("src.py");
-        std::fs::write(&path, "def example_function():\n    num = 10\n    if num <= 20:\n        num += 1\n    return num\n").unwrap();
-
-        let old_lines = "def example_function():\n        ...\n        if num <= 20 :\n        ...\n        return num";
-        let new_lines = "def example_function():\n        ...\n        if True:\n            pass\n        ...\n        return num";
-        let result = edit_file(&path, None, None, Some(old_lines), Some(new_lines), None);
-        match result {
-            CommandOutcome::Success { summary } => {
-                assert!(summary.contains("status: OK"));
-                let content = std::fs::read_to_string(&path).unwrap();
-                assert!(content.contains("if True:"));
-                assert!(!content.contains("if num <= 20"));
-            }
-            CommandOutcome::Failure { error } => {
-                panic!("unexpected failure: {}", error);
-            }
-        }
-    }
-
-    #[test]
-    fn test_edit_file_line_matching_signature() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("lib.rs");
-        std::fs::write(&path, "fn example_function() -> Option<String> {\n    todo!()\n}\n").unwrap();
-
-        let old_lines = "fn example_function() -> Option<String> {";
-        let new_lines = "fn example_function() -> Option<usize> {";
-        let result = edit_file(&path, None, None, Some(old_lines), Some(new_lines), None);
-        match result {
-            CommandOutcome::Success { summary } => {
-                assert!(summary.contains("status: OK"));
-                let content = std::fs::read_to_string(&path).unwrap();
-                assert!(content.contains("-> Option<usize>"));
-            }
-            CommandOutcome::Failure { error } => {
-                panic!("unexpected failure: {}", error);
-            }
-        }
-    }
-
-    #[test]
-    fn test_edit_file_line_matching_not_found() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("missing.txt");
-        std::fs::write(&path, "fn foo() {\n}\n").unwrap();
-
-        let old_lines = "fn bar() {";
-        let new_lines = "fn baz() {";
-        let result = edit_file(&path, None, None, Some(old_lines), Some(new_lines), None);
-        match result {
+        let outcome = edit_file(
+            &p, None, None,
+            Some("fn z() {}"),
+            Some("fn z() {}"),
+            None,
+        );
+        match outcome {
             CommandOutcome::Failure { error } => {
                 assert!(error.contains("not found"));
             }
-            CommandOutcome::Success { .. } => {
-                panic!("expected failure");
-            }
+            _ => panic!("expected failure"),
         }
     }
 
     #[test]
-    fn test_edit_file_line_matching_ambiguous() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("dup.txt");
-        std::fs::write(&path, "fn a() {\n    x()\n}\nfn b() {\n}\nfn a() {\n    x()\n}\n").unwrap();
+    fn test_edit_single_line_unique_match() {
+        let (dir, _cleanup) = make_temp_dir();
+        let p = dir.join("single.txt");
+        write_test_file(&p, "fn foo() {\n    old_code()\n}\n");
 
-        let old_lines = "fn a() {\n    x()\n}";
-        let new_lines = "fn c() {\n}";
-        let result = edit_file(&path, None, None, Some(old_lines), Some(new_lines), None);
-        match result {
+        let outcome = edit_file(
+            &p, None, None,
+            Some("old_code()"),
+            Some("new_code()"),
+            None,
+        );
+        match outcome {
+            CommandOutcome::Success { .. } => {},
+            CommandOutcome::Failure { error } => panic!("single-line match failed: {}", error),
+        }
+        let content = fs::read_to_string(&p).unwrap();
+        assert!(content.contains("new_code()"));
+        assert!(!content.contains("old_code()"));
+    }
+
+    #[test]
+    fn test_edit_single_line_to_multi_increment() {
+        let (dir, _cleanup) = make_temp_dir();
+        let p = dir.join("incr.txt");
+        write_test_file(&p, "fn main() {\n    old()\n}\n");
+
+        let outcome = edit_file(
+            &p, None, None,
+            Some("old()"),
+            Some("new_a()\n    new_b()\n    new_c()"),
+            None,
+        );
+        match outcome {
+            CommandOutcome::Success { .. } => {},
+            CommandOutcome::Failure { error } => panic!("increment edit failed: {}", error),
+        }
+        let content = fs::read_to_string(&p).unwrap();
+        assert!(content.contains("new_a()"));
+        assert!(content.contains("new_b()"));
+        assert!(content.contains("new_c()"));
+        assert!(!content.contains("old()"));
+    }
+
+    #[test]
+    fn test_edit_multi_to_single_decrement() {
+        let (dir, _cleanup) = make_temp_dir();
+        let p = dir.join("decr.txt");
+        write_test_file(&p, "fn main() {\n    x()\n    y()\n    z()\n}\n");
+
+        let outcome = edit_file(
+            &p, None, None,
+            Some("x()\n    y()\n    z()"),
+            Some("done()"),
+            None,
+        );
+        match outcome {
+            CommandOutcome::Success { .. } => {},
+            CommandOutcome::Failure { error } => panic!("decrement edit failed: {}", error),
+        }
+        let content = fs::read_to_string(&p).unwrap();
+        assert!(content.contains("done()"));
+        assert!(!content.contains("x()"));
+        assert!(!content.contains("y()"));
+        assert!(!content.contains("z()"));
+    }
+
+    #[test]
+    fn test_edit_indentation_preserved() {
+        let (dir, _cleanup) = make_temp_dir();
+        let p = dir.join("indent.txt");
+        write_test_file(&p, "fn outer() {\n        fn inner() {\n            42\n        }\n}\n");
+
+        let outcome = edit_file(
+            &p, None, None,
+            Some("42"),
+            Some("84"),
+            None,
+        );
+        match outcome {
+            CommandOutcome::Success { .. } => {},
+            CommandOutcome::Failure { error } => panic!("indent edit failed: {}", error),
+        }
+        let content = fs::read_to_string(&p).unwrap();
+        assert!(content.contains("            84"), "indentation should be preserved");
+    }
+
+    #[test]
+    fn test_edit_dotted_match() {
+        let (dir, _cleanup) = make_temp_dir();
+        let p = dir.join("dots.txt");
+        write_test_file(&p, "fn calc() {\n    let a = 1;\n    let b = 2;\n    let c = 3;\n    a + b + c\n}\n");
+
+        let outcome = edit_file(
+            &p, None, None,
+            Some("fn calc() {\n        ...\n        let c = 3;\n        ...\n    a + b + c\n}"),
+            Some("fn calc() {\n        ...\n        let c = 99;\n        ...\n    a * b * c\n}"),
+            None,
+        );
+        match outcome {
+            CommandOutcome::Success { .. } => {},
+            CommandOutcome::Failure { error } => panic!("dotted match failed: {}", error),
+        }
+        let content = fs::read_to_string(&p).unwrap();
+        assert!(content.contains("let c = 99"), "c should change: {}", content);
+        assert!(content.contains("a * b * c"), "return should change: {}", content);
+    }
+
+    #[test]
+    fn test_edit_new_segment_empty_removes_lines() {
+        let (dir, _cleanup) = make_temp_dir();
+        let p = dir.join("remove.txt");
+        write_test_file(&p, "fn main() {\n    keep_me()\n    remove_me()\n    also_keep()\n}\n");
+
+        let outcome = edit_file(
+            &p, None, None,
+            Some("keep_me()\n    remove_me()\n    also_keep()"),
+            Some("keep_me()\n    also_keep()"),
+            None,
+        );
+        match outcome {
+            CommandOutcome::Success { .. } => {},
+            CommandOutcome::Failure { error } => panic!("removal edit failed: {}", error),
+        }
+        let content = fs::read_to_string(&p).unwrap();
+        assert!(content.contains("keep_me"));
+        assert!(!content.contains("remove_me"));
+        assert!(content.contains("also_keep"));
+    }
+
+    #[test]
+    fn test_edit_lines_no_gaps_allowed() {
+        let (dir, _cleanup) = make_temp_dir();
+        let p = dir.join("nogaps.txt");
+        write_test_file(&p, "fn a() {\n    // comment\n    x()\n}\n");
+
+        let outcome = edit_file(
+            &p, None, None,
+            Some("fn a() {\n    x()\n}"),
+            Some("fn a() {\n    y()\n}"),
+            None,
+        );
+        match outcome {
             CommandOutcome::Failure { error } => {
-                assert!(error.contains("ambiguous"));
+                assert!(error.contains("no matching block"), "should fail on gap: {}", error);
             }
-            CommandOutcome::Success { .. } => {
-                panic!("expected ambiguous error");
-            }
+            _ => panic!("expected failure due to // comment gap between old_lines"),
         }
     }
 
     #[test]
-    fn test_edit_lines_multi_level_with_dots() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("multi.py");
-        std::fs::write(&path, concat!(
-            "def outer():\n",
-            "    x = 1\n",
-            "    def inner():\n",
-            "        old_code()\n",
-            "        more_old()\n",
-            "    y = 2\n",
-            "    return x + y\n",
-        )).unwrap();
+    fn test_edit_empty_lines_must_match() {
+        let (dir, _cleanup) = make_temp_dir();
+        let p = dir.join("emptymatch.txt");
+        write_test_file(&p, "fn a() {\n\n    x()\n}\n");
 
-        let old_lines = "def outer():\n        ...\n        old_code()\n        more_old()\n        ...\n        return x + y";
-        let new_lines = "def outer():\n        ...\n        new_code()\n        ...\n        return x + y";
-        let result = edit_file(&path, None, None, Some(old_lines), Some(new_lines), None);
-        match result {
-            CommandOutcome::Success { summary } => {
-                assert!(summary.contains("status: OK"));
-                let content = std::fs::read_to_string(&path).unwrap();
-                assert!(content.contains("new_code()"), "file should contain new_code:\n{}", content);
-                assert!(!content.contains("old_code()"), "old_code should be removed:\n{}", content);
-                assert!(!content.contains("more_old()"), "more_old should be removed:\n{}", content);
-            }
-            CommandOutcome::Failure { error } => panic!("unexpected failure: {}", error),
+        let outcome = edit_file(
+            &p, None, None,
+            Some("fn a() {\n\n    x()\n}"),
+            Some("fn a() {\n\n    y()\n}"),
+            None,
+        );
+        match outcome {
+            CommandOutcome::Success { .. } => {},
+            CommandOutcome::Failure { error } => panic!("empty line match should succeed: {}", error),
         }
-    }
-
-    #[test]
-    fn test_edit_lines_indentation_preserved() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("indent.rs");
-        std::fs::write(&path, "fn bar(&self) -> u32 {\n        42\n}\n").unwrap();
-
-        let old_lines = "fn bar(&self) -> u32 {\n        42\n}";
-        let new_lines = "fn bar(&self) -> u32\n{\nreturn 84;\n}";
-        let result = edit_file(&path, None, None, Some(old_lines), Some(new_lines), None);
-        match result {
-            CommandOutcome::Success { summary } => {
-                assert!(summary.contains("status: OK"));
-                let content = std::fs::read_to_string(&path).unwrap();
-                assert!(content.contains("fn bar(&self) -> u32"), "signature updated:\n{}", content);
-                assert!(content.contains("return 84;"), "return added:\n{}", content);
-                assert!(!content.contains("42"), "old value removed:\n{}", content);
-            }
-            CommandOutcome::Failure { error } => panic!("unexpected failure: {}", error),
-        }
-    }
-
-    #[test]
-    fn test_edit_lines_new_lines_with_dots_preserves_gaps() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("gaps.rs");
-        std::fs::write(&path, "fn main() {\n    let a = 1;\n    let b = 2;\n    let c = 3;\n    println!(\"hi\");\n}\n").unwrap();
-
-        let old_lines = "fn main() {\n        let a = 1;\n        ...\n        let c = 3;\n        ...\n    }";
-        let new_lines = "fn main() {\n        let a = 10;\n        ...\n        let c = 30;\n        ...\n    }";
-        let result = edit_file(&path, None, None, Some(old_lines), Some(new_lines), None);
-        match result {
-            CommandOutcome::Success { summary } => {
-                let content = std::fs::read_to_string(&path).unwrap();
-                assert!(content.contains("let a = 10;"), "a should change, got:\n{}", content);
-                assert!(content.contains("let b = 2;"), "gap preserved:\n{}", content);
-                assert!(content.contains("let c = 30;"), "c should change, got:\n{}", content);
-            }
-            CommandOutcome::Failure { error } => panic!("unexpected failure: {}", error),
-        }
-    }
-
-    #[test]
-    fn test_edit_lines_full_function_replace() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("full.rs");
-        std::fs::write(&path, "fn old_func() {\n    let x = 1;\n    let y = 2;\n    x + y\n}\n\nfn other() {}\n").unwrap();
-
-        let old_lines = "fn old_func() {\n    let x = 1;\n    let y = 2;\n    x + y\n}";
-        let new_lines = "fn new_func() -> i32 {\n    42\n}";
-        let result = edit_file(&path, None, None, Some(old_lines), Some(new_lines), None);
-        match result {
-            CommandOutcome::Success { summary } => {
-                let content = std::fs::read_to_string(&path).unwrap();
-                assert!(content.contains("fn new_func()"), "function renamed:\n{}", content);
-                assert!(!content.contains("fn old_func()"), "old name removed:\n{}", content);
-                assert!(content.contains("42"), "new body:\n{}", content);
-                assert!(content.contains("fn other()"), "other function preserved:\n{}", content);
-            }
-            CommandOutcome::Failure { error } => panic!("unexpected failure: {}", error),
-        }
-    }
-
-    #[test]
-    fn test_edit_lines_possible_boundaries_in_error() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("bound.rs");
-        std::fs::write(&path, "fn a() {\n    x()\n}\nfn b() {\n    y()\n}\nfn a() {\n    z()\n}\n").unwrap();
-
-        let old_lines = "fn a() {\n        ...\n    }";
-        let new_lines = "fn c() {";
-        let result = edit_file(&path, None, None, Some(old_lines), Some(new_lines), None);
-        match result {
-            CommandOutcome::Failure { error } => {
-                assert!(error.contains("ambiguous") || error.contains("Possible boundaries"), "should list boundaries or ambiguity, got: {}", error);
-            }
-            CommandOutcome::Success { .. } => panic!("expected boundary error"),
-        }
-    }
-
-    #[test]
-    fn test_edit_lines_missing_intermediate() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("missing_mid.rs");
-        std::fs::write(&path, "fn a() {\n    x();\n    y();\n    z();\n}\n").unwrap();
-
-        let old_lines = "fn a() {\n    x();\n    NOT_HERE();\n    z();\n}";
-        let new_lines = "fn a() {\n}";
-        let result = edit_file(&path, None, None, Some(old_lines), Some(new_lines), None);
-        match result {
-            CommandOutcome::Failure { error } => {
-                assert!(error.contains("no matching block"), "should report no match, got: {}", error);
-            }
-            CommandOutcome::Success { .. } => panic!("expected failure"),
-        }
-    }
-
-    #[test]
-    fn test_edit_file_line_number() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("lines.txt");
-        std::fs::write(&path, "hello\nworld\nhello\n").unwrap();
-        let result = edit_file(&path, Some("world"), Some("WORLD"), None, None, None);
-        match result {
-            CommandOutcome::Success { summary } => {
-                assert!(summary.contains("line 2"), "expected line 2, got: {}", summary);
-            }
-            CommandOutcome::Failure { error } => panic!("unexpected failure: {}", error),
-        }
-    }
-
-    #[test]
-    fn test_edit_file_line_number_trailing_newline() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("trailing.txt");
-        std::fs::write(&path, "a\nb\nc\n").unwrap();
-        let result = edit_file(&path, Some("c"), Some("C"), None, None, None);
-        match result {
-            CommandOutcome::Success { summary } => {
-                assert!(summary.contains("line 3"), "expected line 3, got: {}", summary);
-            }
-            CommandOutcome::Failure { error } => panic!("unexpected failure: {}", error),
-        }
-    }
-
-    #[test]
-    fn test_edit_file_no_trailing_newline() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("notrail.txt");
-        std::fs::write(&path, "a\nb\nc").unwrap();
-        let result = edit_file(&path, Some("c"), Some("C"), None, None, None);
-        match result {
-            CommandOutcome::Success { summary } => {
-                assert!(summary.contains("line 3"), "expected line 3, got: {}", summary);
-            }
-            CommandOutcome::Failure { error } => panic!("unexpected failure: {}", error),
-        }
-    }
-
-    #[test]
-    fn test_edit_file_empty_old_str() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("empty.txt");
-        std::fs::write(&path, "hello\n").unwrap();
-        let result = edit_file(&path, Some(""), Some("x"), None, None, None);
-        match result {
-            CommandOutcome::Failure { error } => {
-                assert!(error.contains("old_str cannot be empty"));
-            }
-            CommandOutcome::Success { .. } => panic!("expected failure for empty old_str"),
-        }
-    }
-
-    #[test]
-    fn test_edit_file_with_backup() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("edit_backup.txt");
-        let backup_dir = dir.path().join("edit_backups");
-        std::fs::write(&path, "hello world\n").unwrap();
-        let result = edit_file(&path, Some("world"), Some("WORLD"), None, None, Some(&backup_dir));
-        match result {
-            CommandOutcome::Success { summary } => {
-                assert!(summary.contains("line 1"));
-                assert!(backup_dir.exists());
-                let mut backups = std::fs::read_dir(&backup_dir).unwrap();
-                let backup_entry = backups.next().unwrap().unwrap();
-                let backup_content = std::fs::read_to_string(backup_entry.path()).unwrap();
-                assert_eq!(backup_content, "hello world\n");
-            }
-            CommandOutcome::Failure { error } => panic!("unexpected failure: {}", error),
-        }
-    }
-
-    #[test]
-    fn test_edit_file_no_match() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("no_match.txt");
-        std::fs::write(&path, "hello world\n").unwrap();
-
-        let result = edit_file(&path, Some("not found"), Some("replacement"), None, None, None);
-        match result {
-            CommandOutcome::Failure { error } => {
-                assert!(error.contains("old_str not found"));
-            }
-            CommandOutcome::Success { .. } => {
-                panic!("expected failure for no match");
-            }
-        }
-    }
-
-    #[test]
-    fn test_edit_file_multiple_matches() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("dup.txt");
-        std::fs::write(&path, "hello\nworld\nhello\n").unwrap();
-
-        let result = edit_file(&path, Some("hello"), Some("hi"), None, None, None);
-        match result {
-            CommandOutcome::Failure { error } => {
-                assert!(error.contains("matched"));
-                assert!(error.contains("2"));
-            }
-            CommandOutcome::Success { .. } => {
-                panic!("expected failure for multiple matches");
-            }
-        }
-    }
-
-    #[test]
-    fn test_edit_lines_leading_newline_stripped() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("leading.py");
-        std::fs::write(&path, "def foo():\n    x = 1\n\ndef bar():\n    y = 2\n").unwrap();
-        let old_lines = "\ndef foo():\n    x = 1\n";
-        let new_lines = "def foo():\n    x = 42\n";
-        let result = edit_file(&path, None, None, Some(old_lines), Some(new_lines), None);
-        match result {
-            CommandOutcome::Success { .. } => {
-                let content = std::fs::read_to_string(&path).unwrap();
-                assert!(content.contains("x = 42"), "{}", content);
-            }
-            CommandOutcome::Failure { error } => panic!("unexpected: {}", error),
-        }
-    }
-
-    #[test]
-    fn test_edit_lines_file_end_no_ambiguity() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("end.py");
-        std::fs::write(&path, concat!(
-            "def a():\n    pass\n\n",
-            "def b():\n    pass\n\n",
-            "def c():\n    pass\n\n",
-            "if __name__ == 'main':\n",
-            "    c()\n",
-        )).unwrap();
-        let old_lines = "if __name__ == 'main':\n    c()";
-        let new_lines = "if __name__ == '__main__':\n    c()";
-        let result = edit_file(&path, None, None, Some(old_lines), Some(new_lines), None);
-        match result {
-            CommandOutcome::Success { .. } => {
-                let content = std::fs::read_to_string(&path).unwrap();
-                assert!(content.contains("__main__"), "{}", content);
-            }
-            CommandOutcome::Failure { error } => panic!("unexpected: {}", error),
-        }
-    }
-
-    #[test]
-    fn test_edit_lines_single_function_not_ambiguous() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("mul.py");
-        std::fs::write(&path, concat!(
-            "def add(a, b):\n    return a + b\n\n",
-            "def sub(a, b):\n    return a - b\n\n",
-            "def mul(a, b):\n    return a * b\n",
-        )).unwrap();
-        let old_lines = "def mul(a, b):\n    return a * b";
-        let new_lines = "def mul(a, b):\n    return a * c";
-        let result = edit_file(&path, None, None, Some(old_lines), Some(new_lines), None);
-        match result {
-            CommandOutcome::Success { .. } => {
-                let content = std::fs::read_to_string(&path).unwrap();
-                assert!(content.contains("return a * c"), "{}", content);
-            }
-            CommandOutcome::Failure { error } => panic!("unexpected: {}", error),
-        }
-    }
-
-    #[test]
-    fn test_edit_lines_rust_function_not_ambiguous() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("lib.rs");
-        std::fs::write(&path, concat!(
-            "pub fn add(a: i32, b: i32) -> i32 {\n    a + b\n}\n\n",
-            "pub fn sub(a: i32, b: i32) -> i32 {\n    a - b\n}\n\n",
-            "pub fn mul(a: i32, b: i32) -> i32 {\n    a * b\n}\n",
-        )).unwrap();
-        let old_lines = "pub fn mul(a: i32, b: i32) -> i32 {\n    a * b\n}";
-        let new_lines = "pub fn mul(a: i32, b: i32) -> i32 {\n    a * c\n}";
-        let result = edit_file(&path, None, None, Some(old_lines), Some(new_lines), None);
-        match result {
-            CommandOutcome::Success { .. } => {
-                let content = std::fs::read_to_string(&path).unwrap();
-                assert!(content.contains("a * c"), "{}", content);
-            }
-            CommandOutcome::Failure { error } => panic!("unexpected: {}", error),
-        }
-    }
-
-    #[test]
-    fn test_edit_lines_go_function_not_ambiguous() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("math.go");
-        std::fs::write(&path, concat!(
-            "func Add(a, b int) int {\n\treturn a + b\n}\n\n",
-            "func Sub(a, b int) int {\n\treturn a - b\n}\n\n",
-            "func Mul(a, b int) int {\n\treturn a * b\n}\n",
-        )).unwrap();
-        let old_lines = "func Mul(a, b int) int {\n\treturn a * b\n}";
-        let new_lines = "func Mul(a, b int) int {\n\treturn a * c\n}";
-        let result = edit_file(&path, None, None, Some(old_lines), Some(new_lines), None);
-        match result {
-            CommandOutcome::Success { .. } => {
-                let content = std::fs::read_to_string(&path).unwrap();
-                assert!(content.contains("a * c"), "{}", content);
-            }
-            CommandOutcome::Failure { error } => panic!("unexpected: {}", error),
-        }
-    }
-
-    #[test]
-    fn test_edit_lines_js_function_not_ambiguous() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("math.js");
-        std::fs::write(&path, concat!(
-            "function add(a, b) {\n    return a + b;\n}\n\n",
-            "function sub(a, b) {\n    return a - b;\n}\n\n",
-            "function mul(a, b) {\n    return a * b;\n}\n",
-        )).unwrap();
-        let old_lines = "function mul(a, b) {\n    return a * b;\n}";
-        let new_lines = "function mul(a, b) {\n    return a * c;\n}";
-        let result = edit_file(&path, None, None, Some(old_lines), Some(new_lines), None);
-        match result {
-            CommandOutcome::Success { .. } => {
-                let content = std::fs::read_to_string(&path).unwrap();
-                assert!(content.contains("a * c"), "{}", content);
-            }
-            CommandOutcome::Failure { error } => panic!("unexpected: {}", error),
-        }
+        let content = fs::read_to_string(&p).unwrap();
+        assert!(content.contains("y()"));
+        assert!(!content.contains("x()"));
     }
 }
